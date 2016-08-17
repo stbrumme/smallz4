@@ -33,7 +33,7 @@ typedef void   (*SEND_BYTES)(const unsigned char* data, size_t numBytes);
 
 /// input stream,  usually stdin
 static FILE* in = NULL;
-/// read several bytes
+/// read several bytes, return number of actually read bytes
 static size_t getBytesFromIn(unsigned char* data, size_t numBytes)
 {
   if (data != NULL && numBytes > 0)
@@ -61,11 +61,12 @@ static void sendByteToOut(unsigned char data)
 
 // ----- constants and types -----
 
-static const char* Version = "0.3";
+static const char* Version = "0.4";
 /// a block can be 4 MB
 typedef uint32_t Length;
 /// matches must start within the most recent 64k
 typedef uint16_t Distance;
+
 /// maximum match distance
 const Distance MaxDistance = 65534;
 /// marker for "no match"
@@ -82,8 +83,10 @@ const size_t   BlockEndLiterals =  5;
 const uint8_t  HashBits       = 20;
 /// stop match finding after MaxChainLength steps (default is unlimited => optimal parsing)
 const uint32_t MaxChainLength = MaxDistance;
-/// greedy mode for short chains (compression level <= 4) instead of optimal parsing
-const uint32_t ShortChainsGreedy = 4;
+/// greedy mode for short chains (compression level <= 3) instead of optimal parsing / lazy evaluation
+const uint32_t ShortChainsGreedy = 3;
+/// lazy evaluation for medium-sized chains (compression level > 3 and <= 6)
+const uint32_t ShortChainsLazy   = 6;
 /// refer to location of the previous match (implicit hash chain)
 const size_t   PreviousSize   = 1 << 16;
 
@@ -292,24 +295,25 @@ void estimateCosts(std::vector<Match>& matches)
   size_t posLastMatch = matches.size();
   for (int i = matches.size() - (1 + BlockEndLiterals); i >= 0; i--) // ignore the last 5 bytes, they are always literals
   {
+    // watch out for long literal strings that need extra bytes
+    Length numLiterals = posLastMatch - i;
     // assume no match
     Cost minCost = cost[i + 1] + 1;
+    // an extra byte for every 255 literals required to store length (first 14 bytes are "for free")
+    if (numLiterals >= 15 && (numLiterals - 15) % 255 == 0)
+      minCost++;
+
     // if encoded as a literal
     Length bestLength = 1;
 
-    // watch out for long literal strings that need extra bytes
-    Length numLiterals = posLastMatch - i;
-    // add extra bytes required to store length
-    if (numLiterals > 14)
-      minCost += 1 + (numLiterals - 14) / 255;
-
     // analyze longest match
     Match match = matches[i];
+
     // match must not cross block borders
     if (match.isMatch() && i + match.length + BlockEndLiterals > blockEnd)
       match.length = blockEnd - (i + BlockEndLiterals);
 
-    // try all lengths
+    // try all match lengths
     for (Length length = MinMatch; length <= match.length; length++)
     {
       // token (1 byte) + offset (2 bytes)
@@ -319,19 +323,32 @@ void estimateCosts(std::vector<Match>& matches)
       if (length > 18)
         currentCost += 1 + (length - 18) / 255;
 
-      // better ?
+      // better choice ?
       if (currentCost <= minCost)
       {
+        // regarding the if-condition:
+        // "<"  prefers literals and shorter matches
+        // "<=" prefers longer matches
+        // they should produce the same number of bytes (because of the same cost)
+        // ... but every now and then it doesn't !
+        // that's why: too many consecutive literals require an extra length byte
+        // (which we took into consideration a few lines above)
+        // but we only looked at literals beyond the current position
+        // if there are many literal in front of the current position
+        // then it may be better to emit a match with the same cost as the literals at the current position
+        // => it "breaks" the long chain of literals and removes the extra length byte
         minCost    = currentCost;
         bestLength = length;
+        // performance-wise, a long match is usually faster during decoding than multiple short matches
+        // on the other hand, literals are faster than short matches as well (assuming same cost)
       }
 
-      // TODO: very long self-referencing matches
-      if (match.distance == 1 && match.length > 18)
+      // TODO: very long self-referencing matches can slow down the program A LOT
+      if (match.distance == 1 && match.length > 18 + 255)
       {
         // assume that longest match is always the best match
         bestLength = match.length;
-        minCost    = cost[i + length] + 1 + 2 + 1 + (length - 18) / 255;
+        minCost    = cost[i + match.length] + 1 + 2 + 1 + (match.length - 18) / 255;
         break;
       }
     }
@@ -344,6 +361,10 @@ void estimateCosts(std::vector<Match>& matches)
     cost[i] = minCost;
     // and adjust best match
     matches[i].length = bestLength;
+    if (bestLength == 1)
+      matches[i].distance = NoPrevious;
+    // note: if bestLength is smaller than the previous matches[i].length then there might be a closer match
+    //       which could be more cache-friendly (=> faster decoding)
   }
 }
 
@@ -369,6 +390,9 @@ void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes, SEND_BYTE sendByte)
   size_t dataZero = 0;
   // last already read position
   size_t numRead  = 0;
+
+  // passthru data (but still wrap in LZ4 format)
+  bool uncompressed = (maxChainLength == 0);
 
   // last time we saw a hash
   const uint32_t HashSize = 1 << HashBits;
@@ -418,15 +442,19 @@ void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes, SEND_BYTE sendByte)
 
     // greedy mode is much faster but produces larger output
     bool isGreedy = (maxChainLength <= ShortChainsGreedy);
+    // lazy evaluation: if there is a match, then try running match finder on next position, too, but not after that
+    bool isLazy   = !isGreedy && (maxChainLength <= ShortChainsLazy);
     // skip match finding on the next x bytes in greedy mode
-    size_t skipGreedy = 0;
+    size_t skipMatches = 0;
+    // allow match finding on the next byte but skip afterwards (in lazy mode)
+    bool   lazyEvaluation = false;
 
     std::vector<Match> matches(blockSize);
     // find longest matches for each position
     for (size_t i = 0; i < blockSize; i++)
     {
       // no matches at the end of the block (or matching disabled by command-line option -0 )
-      if (i + BlockEndNoMatch >= blockSize || maxChainLength == 0)
+      if (i + BlockEndNoMatch >= blockSize || uncompressed)
         continue;
 
       // detect self-matching
@@ -523,29 +551,36 @@ void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes, SEND_BYTE sendByte)
       }*/
 
       // skip match finding if in greedy mode
-      if (skipGreedy > 0)
+      if (skipMatches > 0)
       {
-        skipGreedy--;
-        continue;
+        skipMatches--;
+        if (!lazyEvaluation)
+          continue;
+        lazyEvaluation = false;
       }
 
       // and look for longest match
-      matches[i] = findLongestMatch(&data[0], i + lastBlock, dataZero, nextBlock - BlockEndLiterals, &previousExact[0]);
+      Match longest = findLongestMatch(&data[0], i + lastBlock, dataZero, nextBlock - BlockEndLiterals, &previousExact[0]);
+      matches[i] = longest;
 
-      // no match finding needed for the next few bytes in greedy mode
-      if (isGreedy)
-        skipGreedy = matches[i].length;
+      // no match finding needed for the next few bytes in greedy/lazy mode
+      if (longest.isMatch() && (isLazy || isGreedy))
+      {
+        lazyEvaluation = (skipMatches == 0);
+        skipMatches = longest.length;
+      }
     }
 
     // ==================== estimate costs (number of compressed bytes) ====================
 
+    // not needed in greedy mode and/or very short blocks
     if (matches.size() > BlockEndNoMatch && maxChainLength > ShortChainsGreedy)
       estimateCosts(matches);
 
     // ==================== select best matches ====================
 
     std::vector<unsigned char> block;
-    if (maxChainLength > 0)
+    if (!uncompressed)
       block = selectBestMatches(matches, &data[lastBlock - dataZero]);
 
     // ==================== write to disk ====================
@@ -553,7 +588,7 @@ void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes, SEND_BYTE sendByte)
     // and write to disk, automatically decide whether compressed or uncompressed
     size_t uncompressedSize = nextBlock - lastBlock;
     // did compression do harm ?
-    bool useCompression = block.size() < uncompressedSize && maxChainLength > 0;
+    bool useCompression = block.size() < uncompressedSize && !uncompressed;
 
     // block size
     uint32_t numBytes = useCompression ? block.size() : uncompressedSize;
@@ -625,7 +660,7 @@ int main(int argc, const char* argv[])
                "Compression levels:\n"
                " -0                 No compression\n"
                " -1 ... -%d          Greedy search, check 1 to %d matches\n"
-               " -%d ... -8          Optimal parsing, check %d to 8 matches\n"
+               " -%d ... -8          Lazy matching with optimal parsing, check %d to 8 matches\n"
                " -9                 Optimal parsing, check all possible matches\n"
                "\n"
                "(C) 2016 Stephan Brumme, http://create.stephan-brumme.com/smallz4/\n"

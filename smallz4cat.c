@@ -20,6 +20,9 @@
 #include <string.h> // memcpy
 
 
+#define TRACE(text, ...) fprintf(stderr, text, ##__VA_ARGS__);
+
+
 /// error handler
 void error(const char* msg)
 {
@@ -31,9 +34,9 @@ void error(const char* msg)
 // ==================== I/O INTERFACE ====================
 
 
-// read one byte from input, see getByteFromIn() for a basic implementation
+// read one byte from input, see getByteFromIn()  for a basic implementation
 typedef unsigned char (*GET_BYTE)  ();
-// write several bytes,      see sendToOut()     for a basic implementation
+// write several bytes,      see sendBytesToOut() for a basic implementation
 typedef void          (*SEND_BYTES)(const unsigned char*, unsigned int);
 
 /// input stream,  usually stdin
@@ -63,7 +66,7 @@ static unsigned char getByteFromIn()
 /// output stream, usually stdout
 static FILE* out = NULL;
 /// write a block of bytes
-static void sendToOut(const unsigned char* data, unsigned int numBytes)
+static void sendBytesToOut(const unsigned char* data, unsigned int numBytes)
 {
   if (data != NULL && numBytes > 0)
     fwrite(data, 1, numBytes, out);
@@ -82,27 +85,35 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
   unsigned char signature3 = getByte();
   unsigned char signature4 = getByte();
   uint32_t signature = (signature4 << 24) | (signature3 << 16) | (signature2 << 8) | signature1;
-  if (signature != 0x184D2204) // legacy format: 0x184C2102
+  int isModern = (signature == 0x184D2204);
+  int isLegacy = (signature == 0x184C2102);
+  if (!isModern && !isLegacy)
     error("invalid signature");
 
-  // flags (version is ignored)
-  unsigned char flags = getByte();
-  unsigned char hasBlockChecksum   = flags & 16;
-  unsigned char hasContentSize     = flags &  8;
-  unsigned char hasContentChecksum = flags &  4;
-
-  // ignore blocksize
-  getByte();
-
-  if (hasContentSize)
+  unsigned char hasBlockChecksum   = 0;
+  unsigned char hasContentSize     = 0;
+  unsigned char hasContentChecksum = 0;
+  if (isModern)
   {
-    // ignore, skip 8 bytes
-    getByte(); getByte(); getByte(); getByte();
-    getByte(); getByte(); getByte(); getByte();
-  }
+    // flags (version is ignored)
+    unsigned char flags = getByte();
+    hasBlockChecksum   = flags & 16;
+    hasContentSize     = flags &  8;
+    hasContentChecksum = flags &  4;
 
-  // ignore header checksum
-  getByte();
+    // ignore blocksize
+    getByte();
+
+    if (hasContentSize)
+    {
+      // ignore, skip 8 bytes
+      getByte(); getByte(); getByte(); getByte();
+      getByte(); getByte(); getByte(); getByte();
+    }
+
+    // ignore header checksum (xxhash32 of everything up this point & 0xFF)
+    getByte();
+  }
 
   // don't lower this value, backreferences can be 64kb far away
 #define HISTORY_SIZE 64*1024
@@ -121,12 +132,13 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
     blockSize |= (uint32_t)getByte() << 24;
 
     // highest bit set ?
-    uint32_t isCompressed = (blockSize & 0x80000000) == 0;
-    blockSize &= 0x7FFFFFFF;
+    unsigned char isCompressed = isLegacy || (blockSize & 0x80000000) == 0;
+    if (isModern)
+      blockSize &= 0x7FFFFFFF;
 
     // stop after last block
     if (blockSize == 0)
-      break; // only way to escape the endless while(1) loop
+      break;
 
     if (isCompressed)
     {
@@ -136,6 +148,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
       {
         // get a token
         unsigned char token = getByte();
+
         blockOffset++;
 
         // determine number of literals
@@ -169,10 +182,6 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
         // last token has only literals
         if (blockOffset == blockSize)
           break;
-
-        // overflow
-        if (blockOffset >  blockSize - 12)
-          error("match not allowed close to the end of a block");
 
         // match distance is encoded by two bytes (little endian)
         blockOffset += 2;
@@ -234,6 +243,10 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
           }
         }
       }
+
+      // all legacy blocks must be completely filled - except for the last one
+      if (isLegacy && blockSize < 8*1024*1024)
+        break;
     }
     else
     {
@@ -278,8 +291,8 @@ int main(int argc, const char* argv[])
   // default input/output streams
   in = stdin; out = stdout;
 
-  // file is given as first parameter or stdin if no parameter is given (or "-")
-  if (argc == 2 && argv[1][0] != '-')
+  // first command-line parameter is our input filename / but ignore "-" which stands for STDIN
+  if (argc == 2 && argv[1][0] != '-' && argv[1][1] != '\0')
   {
     in = fopen(argv[1], "rb");
     if (!in)
@@ -287,6 +300,6 @@ int main(int argc, const char* argv[])
   }
 
   // and go !
-  unlz4(getByteFromIn, sendToOut);
+  unlz4(getByteFromIn, sendBytesToOut);
   return 0;
 }
