@@ -61,7 +61,7 @@ static void sendByteToOut(unsigned char data)
 
 // ----- constants and types -----
 
-static const char* Version = "0.4";
+static const char* Version = "0.5";
 /// a block can be 4 MB
 typedef uint32_t Length;
 /// matches must start within the most recent 64k
@@ -102,19 +102,16 @@ const uint32_t MaxBlockSize = MaxBlockSizeArray[MaxBlockSizeId];
 /// match
 struct Match
 {
-  /// default is "no match", just a literal (1 byte)
-  Match() : distance(NoPrevious), length(1) {}
-
   /// true, if long enough
   bool isMatch() const
   {
     return length >= MinMatch;
   }
 
-  /// start of match
-  Distance distance;
   /// length of match
   Length   length;
+  /// start of match
+  Distance distance;
 };
 
 //  ----- globals -----
@@ -124,16 +121,26 @@ static uint32_t maxChainLength = MaxDistance; // => no limit, but can be changed
 
 //  ----- code -----
 
+/// return true, if four bytes at a and b match
+static inline bool match4(const void* a, const void* b)
+{
+  return *(uint32_t*)a == *(uint32_t*)b;
+}
+
+
 /// find longest match of data[pos] between data[begin] and data[end], use match chain stored in previous
 static Match findLongestMatch(const unsigned char* data, uint32_t pos, uint32_t begin, uint32_t end, const Distance* previous)
 {
   Match result;
+  result.length = 1;
 
   // compression level: look only at the first n entries of the match chain
   int32_t stepsLeft = maxChainLength;
 
   // pointer to position that is matched against everything in data
-  const unsigned char* current = data + pos - begin;
+  const unsigned char* const current = data + pos - begin;
+  // don't match beyond this point
+  const unsigned char* const stop    = current + end - pos;
 
   // get distance to previous match, abort if -1 => not existing
   Distance distance = previous[pos % PreviousSize];
@@ -145,33 +152,63 @@ static Match findLongestMatch(const unsigned char* data, uint32_t pos, uint32_t 
     if (totalDistance > MaxDistance)
       break;
 
+    // prepare next position
+    distance = previous[(pos - totalDistance) % PreviousSize];
+
     // stop searching on lower compression levels
     if (stepsLeft-- <= 0)
       break;
 
-    // prepare next position
-    distance = previous[(pos - totalDistance) % PreviousSize];
+    // let's introduce a new pointer atLeast that points to the first "new" byte of a potential longer match
+    const unsigned char* atLeast = current + result.length + 1;
 
-    // quick check of last 4 bytes vs. the best match so far (these two lines are just a performance optimization)
-    if (result.length >= 8 && *(uint32_t*)(current - totalDistance + result.length - 4) != *(uint32_t*)(current + result.length - 4))
+    // the idea is to split the comparison algorithm into 2 phases
+    // (1) scan backward from atLeast to current, abort if mismatch
+    // (2) scan forward  until a mismatch is found and store length/distance of this new best match
+    // current                  atLeast
+    //    |                        |
+    //    -<<<<<<<< phase 1 <<<<<<<<
+    //                              >>> phase 2 >>>
+
+    // impossible to find a longer match because not enough bytes left ?
+    if (atLeast > stop)
+      break;
+
+    // all bytes between current and atLeast shall be identical, compare 4 bytes at once
+    const unsigned char* compare = atLeast - 4;
+    bool ok = true;
+    while (compare > current)
+    {
+      // mismatch ?
+      if (!match4(compare, compare - totalDistance))
+      {
+        ok = false;
+        break;
+      }
+
+      // keep going ...
+      compare -= 4;
+      // note: - the first four bytes always match
+      //       - in the last iteration, compare is either current + 1 or current + 2 or current + 3
+      //       - therefore we compare a few bytes twice => but a check to skip these checks is more expensive
+    }
+    // mismatch ?
+    if (!ok)
       continue;
 
-    // step forward until a difference is found (or end of data is hit)
-    Length length = 4; // first four bytes are a guaranteed match
+    // we have a new best match, now scan forward from the end
+    compare = atLeast;
 
-    // check four bytes at once
-    while (pos + length + 3 < end && *(uint32_t*)(current - totalDistance + length) == *(uint32_t*)(current + length))
-      length += 4;
-    // check the last 1/2/3 bytes
-    while (pos + length     < end &&            *(current - totalDistance + length) ==            *(current + length))
-      length++;
+    // fast loop: check four bytes at once
+    while (compare + 4 <= stop && match4(compare,     compare - totalDistance))
+      compare += 4;
+    // slow loop: check the last 1/2/3 bytes
+    while (compare     <  stop &&       *compare == *(compare - totalDistance))
+      compare++;
 
-    // match longer than before ?
-    if (length > result.length)
-    {
-      result.distance = totalDistance;
-      result.length   = length;
-    }
+    // store new best match
+    result.distance = totalDistance;
+    result.length   = compare - current;
   }
 
   return result;
