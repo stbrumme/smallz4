@@ -1,15 +1,31 @@
 // //////////////////////////////////////////////////////////
 // smallz4.cpp
 // Copyright (c) 2016 Stephan Brumme. All rights reserved.
-// see http://create.stephan-brumme.com/disclaimer.html
+// see http://create.stephan-brumme.com/smallz4/
 //
+// "MIT License":
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the Software
+// is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+// OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "smallz4.h"
 
-#include <stdio.h>  // stdin/stdout/stderr, fopen, ...
-#include <stdlib.h> // exit()
+#include <stdio.h>    // stdin/stdout/stderr, fopen, ...
 #ifdef _WIN32
   #include <io.h>     // isatty()
 #else
@@ -101,8 +117,6 @@ int main(int argc, const char* argv[])
     showHelp(argv[0]);
     return 0;
   }
-  printf("%d %d %d\n", argc, _fileno(stdin), _isatty(_fileno(stdin)));
-  return 0;
 
   unsigned int maxChainLength = 65536; // "unlimited" because search window contains only 2^16 bytes
 
