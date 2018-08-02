@@ -1,7 +1,7 @@
 // //////////////////////////////////////////////////////////
 // smallz4cat.c
-// Copyright (c) 2016 Stephan Brumme. All rights reserved.
-// see http://create.stephan-brumme.com/smallz4/
+// Copyright (c) 2016-2018 Stephan Brumme. All rights reserved.
+// see https://create.stephan-brumme.com/smallz4/
 //
 // "MIT License":
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -25,12 +25,14 @@
 
 // Limitations:
 // - skippable frames and legacy frames are not implemented (and most likely never will)
-// - checksums are not verified (see http://create.stephan-brumme.com/xxhash/ for a simple implementation)
+// - checksums are not verified (see https://create.stephan-brumme.com/xxhash/ for a simple implementation)
 
 // Replace getByteFromIn() and sendToOut() by your own code if you need in-memory LZ4 decompression.
 // Corrupted data causes a call to error().
 
+// suppress warnings when compiled by Visual C++
 #define _CRT_SECURE_NO_WARNINGS
+
 #include <stdint.h> // uint32_t
 #include <stdio.h>  // stdin/stdout/stderr, fopen, ...
 #include <stdlib.h> // exit()
@@ -61,8 +63,8 @@ static unsigned char getByteFromIn()
   // modify buffer size as you like ... for most use cases, bigger buffer aren't faster anymore - and even reducing to 1 byte works !
 #define READ_BUFFER_SIZE 4*1024
   static unsigned char readBuffer[READ_BUFFER_SIZE];
-  static unsigned int  pos       = 0;
-  static unsigned int  available = 0;
+  static size_t        pos       = 0;
+  static size_t        available = 0;
 
   // refill buffer
   if (pos == available)
@@ -114,6 +116,10 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
     hasBlockChecksum   = flags & 16;
     hasContentSize     = flags &  8;
     hasContentChecksum = flags &  4;
+
+    // dictionary compression a recently introduced feature, not implemented yet
+    if (flags & 1)
+      error("dictionary not supported");
 
     // ignore blocksize
     getByte();
@@ -264,7 +270,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
     }
     else
     {
-      // copy uncompressd data and add to history, too (if next block is compressed and some matches refer to this block)
+      // copy uncompressed data and add to history, too (if next block is compressed and some matches refer to this block)
       while (blockSize-- > 0)
       {
         // copy a byte ...

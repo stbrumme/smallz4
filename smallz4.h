@@ -1,7 +1,7 @@
 // //////////////////////////////////////////////////////////
 // smallz4.h
-// Copyright (c) 2016 Stephan Brumme. All rights reserved.
-// see http://create.stephan-brumme.com/smallz4/
+// Copyright (c) 2016-2018 Stephan Brumme. All rights reserved.
+// see https://create.stephan-brumme.com/smallz4/
 //
 // "MIT License":
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -26,7 +26,6 @@
 #include <stdint.h> // uint16_t, uint32_t, ...
 #include <cstdlib>  // size_t
 #include <vector>
-
 
 /// LZ4 compression with optimal parsing
 /** see smallz4.cpp for a basic I/O interface
@@ -54,7 +53,7 @@ public:
   /// version string
   static const char* const getVersion()
   {
-    return "1.0";
+    return "1.1";
   }
 
 
@@ -81,9 +80,9 @@ private:
   {
     /// each match's length must be >= 4
     MinMatch          =  4,
-    /// no matching within the last few bytes
+    /// last match must not be closer than 12 bytes to the end
     BlockEndNoMatch   = 12,
-    /// last bytes must be literals
+    /// last 5 bytes must be literals, no matching allowed
     BlockEndLiterals  =  5,
 
     /// match finder's hash table size (2^HashBits entries, must be less than 32)
@@ -93,25 +92,25 @@ private:
     BufferSize     = 64*1024,
 
     /// maximum match distance
-    MaxDistance    =   65534,
+    MaxDistance    =   65535,
     /// marker for "no match"
-    NoPrevious     = MaxDistance + 1,
+    NoPrevious     =       0,
     /// stop match finding after MaxChainLength steps (default is unlimited => optimal parsing)
     MaxChainLength = NoPrevious,
 
     /// refer to location of the previous match (implicit hash chain)
-    PreviousSize   = 1 << 16
-  };
+    PreviousSize   = 1 << 16,
 
-  /// maximum block size as defined in LZ4 spec
-  //const uint32_t MaxBlockSizeArray[] = { 0,0,0,0,64*1024,256*1024,1024*1024,4*1024*1024 };
-  /// I only work with the biggest maximum block size (7)
-  static const uint32_t MaxBlockSizeId = 7; // header checksum is precalculated only for 7, too
-  static const uint32_t MaxBlockSize   = 4*1024*1024;//MaxBlockSizeArray[MaxBlockSizeId];
+    /// maximum block size as defined in LZ4 spec: { 0,0,0,0,64*1024,256*1024,1024*1024,4*1024*1024 }
+    /// I only work with the biggest maximum block size (7)
+    MaxBlockSizeId = 7,          
+    MaxBlockSize   = 4*1024*1024
+    // note: xxhash header checksum is precalculated only for 7, too
+  };
 
   //  ----- one and only variable ... -----
 
-  /// how many matches are checked in findLongestMatch
+  /// how many matches are checked in findLongestMatch, lower values yield faster encoding at the cost of worse compression ratio
   unsigned int maxChainLength;
 
   //  ----- code -----
@@ -139,15 +138,17 @@ private:
   }
 
 
-  /// return true, if four bytes at a and b match
-  inline static bool match4(const void* a, const void* b)
+  /// return true, if the four bytes at *a and *b match
+  inline static bool match4(const void* const a, const void* const b)
   {
-    return *(uint32_t*)a == *(uint32_t*)b;
+    return *(const uint32_t*)a == *(const uint32_t*)b;
   }
 
 
   /// find longest match of data[pos] between data[begin] and data[end], use match chain stored in previous
-  Match findLongestMatch(const unsigned char* data, uint32_t pos, uint32_t begin, uint32_t end, const Distance* previous) const
+  Match findLongestMatch(const unsigned char* const data,
+                         size_t pos, size_t begin, size_t end,
+                         const Distance* const previous) const
   {
     Match result;
     result.length = 1;
@@ -162,7 +163,7 @@ private:
 
     // get distance to previous match, abort if -1 => not existing
     Distance distance = previous[pos % PreviousSize];
-    uint32_t totalDistance = 0;
+    size_t totalDistance = 0;
     while (distance != NoPrevious)
     {
       // too far back ?
@@ -178,7 +179,7 @@ private:
         break;
 
       // let's introduce a new pointer atLeast that points to the first "new" byte of a potential longer match
-      const unsigned char* atLeast = current + result.length + 1;
+      const unsigned char* const atLeast = current + result.length + 1;
 
       // the idea is to split the comparison algorithm into 2 phases
       // (1) scan backward from atLeast to current, abort if mismatch
@@ -225,8 +226,8 @@ private:
         compare++;
 
       // store new best match
-      result.distance = totalDistance;
-      result.length   = compare - current;
+      result.distance = Distance(totalDistance);
+      result.length   = Length  (compare - current);
     }
 
     return result;
@@ -235,11 +236,12 @@ private:
 
   /// create shortest output
   /** data points to block's begin; we need it to extract literals **/
-  static std::vector<unsigned char> selectBestMatches(const std::vector<Match>& matches, const unsigned char* data)
+  static std::vector<unsigned char> selectBestMatches(const std::vector<Match>& matches,
+                                                      const unsigned char* const data)
   {
     // store encoded data
     std::vector<unsigned char> result;
-    result.reserve(MaxBlockSize / 2);
+    result.reserve(MaxBlockSize);
 
     // indices of current literal run
     size_t literalsFrom = 0;
@@ -265,7 +267,7 @@ private:
       }
 
       offset += match.length;
-      bool lastToken = (offset == matches.size());
+      const bool lastToken = (offset == matches.size());
       // continue if simple literal
       if (!match.isMatch() && !lastToken)
         continue;
@@ -339,7 +341,7 @@ private:
   /** note: matches are modified (shortened length) if necessary **/
   static void estimateCosts(std::vector<Match>& matches)
   {
-    size_t blockEnd = matches.size();
+    const size_t blockEnd = matches.size();
 
     typedef uint32_t Cost;
     // minimum cost from this position to the end of the current block
@@ -348,10 +350,10 @@ private:
 
     // backwards optimal parsing
     size_t posLastMatch = matches.size();
-    for (int i = matches.size() - (1 + BlockEndLiterals); i >= 0; i--) // ignore the last 5 bytes, they are always literals
+    for (int i = (int)matches.size() - (1 + BlockEndLiterals); i >= 0; i--) // ignore the last 5 bytes, they are always literals
     {
       // watch out for long literal strings that need extra bytes
-      Length numLiterals = posLastMatch - i;
+      const Length numLiterals = Length(posLastMatch - i);
       // assume no match
       Cost minCost = cost[i + 1] + 1;
       // an extra byte for every 255 literals required to store length (first 14 bytes are "for free")
@@ -366,9 +368,9 @@ private:
 
       // match must not cross block borders
       if (match.isMatch() && i + match.length + BlockEndLiterals > blockEnd)
-        match.length = blockEnd - (i + BlockEndLiterals);
+        match.length = Length(blockEnd - (i + BlockEndLiterals));
 
-      // try all match lengths
+      // try all match lengths (first short ones)
       for (Length length = MinMatch; length <= match.length; length++)
       {
         // token (1 byte) + offset (2 bytes)
@@ -454,10 +456,11 @@ private:
     const bool uncompressed = (maxChainLength == 0);
 
     // last time we saw a hash
-    const uint32_t HashSize = 1 << HashBits;
-    std::vector<size_t> lastHash(HashSize, NoPrevious);
+    const uint32_t HashSize   = 1 << HashBits;
+    const size_t   NoLastHash = MaxDistance + 1;
+    std::vector<size_t> lastHash(HashSize, NoLastHash);
     const uint32_t HashMultiplier = 22695477; // taken from https://en.wikipedia.org/wiki/Linear_congruential_generator
-    const uint8_t  HashShift = 32 - HashBits;
+    const uint8_t  HashShift  = 32 - HashBits;
 
     // previous position which starts with the same bytes
     std::vector<Distance> previousHash (PreviousSize, Distance(NoPrevious)); // long chains based on my simple hash
@@ -495,27 +498,34 @@ private:
       if (nextBlock > numRead)
         nextBlock = numRead;
 
-      size_t blockSize = nextBlock - lastBlock;
+      const size_t blockSize = nextBlock - lastBlock;
       // first byte of the currently processed block (std::vector data may contain the last 64k of the previous block, too)
-      const unsigned char* dataBlock = &data[lastBlock - dataZero];
+      const unsigned char* const dataBlock = &data[lastBlock - dataZero];
 
       // ==================== full match finder ====================
 
       // greedy mode is much faster but produces larger output
-      bool isGreedy = (maxChainLength <= ShortChainsGreedy);
+      const bool isGreedy = (maxChainLength <= ShortChainsGreedy);
       // lazy evaluation: if there is a match, then try running match finder on next position, too, but not after that
-      bool isLazy   = !isGreedy && (maxChainLength <= ShortChainsLazy);
+      const bool isLazy   = !isGreedy && (maxChainLength <= ShortChainsLazy);
       // skip match finding on the next x bytes in greedy mode
       size_t skipMatches = 0;
       // allow match finding on the next byte but skip afterwards (in lazy mode)
       bool   lazyEvaluation = false;
 
+      // the last literals of the previous block skipped matching, so they are missing from the hash chains
+      int lookback = (int)dataZero;
+      if (lookback > BlockEndNoMatch)
+        lookback = BlockEndNoMatch;
+      // so let's go back a few bytes
+      lookback = -lookback;
+
       std::vector<Match> matches(blockSize);
       // find longest matches for each position
-      for (size_t i = 0; i < blockSize; i++)
+      for (int i = lookback; i < (int)blockSize; i++)
       {
         // no matches at the end of the block (or matching disabled by command-line option -0 )
-        if (i + BlockEndNoMatch >= blockSize || uncompressed)
+        if (i + BlockEndNoMatch > (int)blockSize || uncompressed)
           continue;
 
         // detect self-matching
@@ -538,21 +548,25 @@ private:
         uint32_t hash = (four * HashMultiplier) >> HashShift;
 
         // get last occurrence of these bits
-        uint32_t last  = lastHash[hash];
+        size_t last = lastHash[hash];
         // and store current position
         lastHash[hash] = i + lastBlock;
 
+        int prevIndex = i % PreviousSize;
+        if (i < 0)
+          prevIndex = (i + MaxBlockSize) % PreviousSize;
+
         // no predecessor or too far away ?
-        uint32_t distance = i + lastBlock - last;
-        if (last == NoPrevious || distance > MaxDistance)
+        size_t distance = i + lastBlock - last;
+        if (last == NoLastHash || distance > MaxDistance)
         {
-          previousHash [i % PreviousSize] = NoPrevious;
-          previousExact[i % PreviousSize] = NoPrevious;
+          previousHash [prevIndex] = NoPrevious;
+          previousExact[prevIndex] = NoPrevious;
           continue;
         }
 
         // build hash chain, i.e. store distance to last match
-        previousHash[i % PreviousSize] = distance;
+        previousHash[prevIndex] = (Distance)distance;
 
         // skip pseudo-matches (hash collisions) and build a second chain where the first four bytes must match exactly
         while (distance != NoPrevious)
@@ -594,22 +608,16 @@ private:
         // no match at all ?
         if (distance == NoPrevious)
         {
-          previousExact[i % PreviousSize] = NoPrevious;
+          previousExact[prevIndex] = NoPrevious;
           continue;
         }
 
         // store distance to previous match
-        previousExact[i % PreviousSize] = distance;
+        previousExact[prevIndex] = (Distance)distance;
 
-        // TODO: long consecutive literals
-        /*if (distance == 1 && i > 0)
-        {
-          if (matches[i - 1].length > MinMatch)
-          {
-            matches[i] = matches[i - 1];
-            //continue;
-          }
-        }*/
+        // no matching if crossing block boundary, just update hash tables
+        if (i < 0)
+          continue;
 
         // skip match finding if in greedy mode
         if (skipMatches > 0)
@@ -621,7 +629,7 @@ private:
         }
 
         // and look for longest match
-        Match longest = findLongestMatch(&data[0], i + lastBlock, dataZero, nextBlock - BlockEndLiterals, &previousExact[0]);
+        Match longest = findLongestMatch(&data[0], i + lastBlock, dataZero, nextBlock - BlockEndLiterals + 1, &previousExact[0]);
         matches[i] = longest;
 
         // no match finding needed for the next few bytes in greedy/lazy mode
@@ -652,12 +660,12 @@ private:
       bool useCompression = block.size() < uncompressedSize && !uncompressed;
 
       // block size
-      uint32_t numBytes = useCompression ? block.size() : uncompressedSize;
+      uint32_t numBytes = uint32_t(useCompression ? block.size() : uncompressedSize);
       uint32_t numBytesTagged = numBytes | (useCompression ? 0 : 0x80000000);
       unsigned char num1 =  numBytesTagged         & 0xFF; sendBytes(&num1, 1);
       unsigned char num2 = (numBytesTagged >>  8)  & 0xFF; sendBytes(&num2, 1);
       unsigned char num3 = (numBytesTagged >> 16)  & 0xFF; sendBytes(&num3, 1);
-      unsigned char num4 = (numBytesTagged >> 24)  & 0x7F; sendBytes(&num4, 1);
+      unsigned char num4 = (numBytesTagged >> 24)  & 0xFF; sendBytes(&num4, 1);
 
       if (useCompression)
         sendBytes(&block[0], numBytes);

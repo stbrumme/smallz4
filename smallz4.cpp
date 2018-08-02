@@ -1,7 +1,7 @@
 // //////////////////////////////////////////////////////////
 // smallz4.cpp
-// Copyright (c) 2016 Stephan Brumme. All rights reserved.
-// see http://create.stephan-brumme.com/smallz4/
+// Copyright (c) 2016-2018 Stephan Brumme. All rights reserved.
+// see https://create.stephan-brumme.com/smallz4/
 //
 // "MIT License":
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -21,11 +21,13 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+// suppress warnings when compiled by Visual C++
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "smallz4.h"
 
-#include <stdio.h>    // stdin/stdout/stderr, fopen, ...
+#include <cstdio>     // stdin/stdout/stderr, fopen, ...
+#include <cstdlib>    // exit
 #ifdef _WIN32
   #include <io.h>     // isatty()
 #else
@@ -72,7 +74,7 @@ void sendBytesToOut(const void* data, size_t numBytes)
 // show simple help
 static void showHelp(const char* program)
 {
-  printf("smalLZ4 %s: LZ4 compressor with optimal parsing, fully compatible with LZ4\n"
+  printf("smalLZ4 %s: compressor with optimal parsing, fully compatible with LZ4 by Yann Collet (see https://lz4.org)\n"
     "\n"
     "Basic usage:\n"
     "  %s [flags] [input] [output]\n"
@@ -100,7 +102,7 @@ static void showHelp(const char* program)
     " -%d ... -8        Lazy matching with optimal parsing, check %d to 8 matches\n"
     " -9               Optimal parsing, check all possible matches\n"
     "\n"
-    "(C) 2016 Stephan Brumme, http://create.stephan-brumme.com/smallz4/\n"
+    "Written in 2016-2018 by Stephan Brumme https://create.stephan-brumme.com/smallz4/\n"
     , smallz4::getVersion()
     , program, program, program, program, program, program, program, program,
     smallz4::ShortChainsGreedy,     smallz4::ShortChainsGreedy,
