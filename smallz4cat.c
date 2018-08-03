@@ -91,9 +91,8 @@ static void sendBytesToOut(const unsigned char* data, unsigned int numBytes)
 
 // ==================== LZ4 DECOMPRESSOR ====================
 
-
 /// decompress everything in input stream (accessed via getByte) and write to output stream (via sendBytes)
-void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
+void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
 {
   // signature
   unsigned char signature1 = getByte();
@@ -109,17 +108,20 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
   unsigned char hasBlockChecksum   = 0;
   unsigned char hasContentSize     = 0;
   unsigned char hasContentChecksum = 0;
+  unsigned char hasDictionaryID    = 0;
   if (isModern)
   {
-    // flags (version is ignored)
+    // flags
     unsigned char flags = getByte();
     hasBlockChecksum   = flags & 16;
     hasContentSize     = flags &  8;
     hasContentChecksum = flags &  4;
+    hasDictionaryID    = flags &  1;
 
-    // dictionary compression a recently introduced feature, not implemented yet
-    if (flags & 1)
-      error("dictionary not supported");
+    // only version 1 file format
+    unsigned char version = flags >> 6;
+    if (version != 1)
+      error("only LZ4 file format version 1 supported");
 
     // ignore blocksize
     getByte();
@@ -128,6 +130,11 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
     {
       // ignore, skip 8 bytes
       getByte(); getByte(); getByte(); getByte();
+      getByte(); getByte(); getByte(); getByte();
+    }
+    if (hasDictionaryID)
+    {
+      // ignore, skip 4 bytes
       getByte(); getByte(); getByte(); getByte();
     }
 
@@ -141,6 +148,27 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes)
   unsigned char history[HISTORY_SIZE];
   // next free position in history[]
   unsigned int  pos = 0;
+
+  // dictionary compression is a recently introduced feature, just move its contents to the buffer
+  if (dictionary != NULL)
+  {
+    // open dictionary
+    FILE* dict = fopen(dictionary, "rb");
+    if (!dict)
+      error("cannot open dictionary");
+
+    // get dictionary's filesize
+    fseek(dict, 0, SEEK_END);
+    size_t dictSize = ftell(dict);
+    // only the last 64k are relevant
+    size_t relevant = dictSize < 65536 ? 0 : dictSize - 65536;
+    fseek(dict, (long)relevant, SEEK_SET);
+    if (dictSize > 65536)
+      dictSize = 65536;
+    // read it and store it at the end of the buffer
+    fread(history + HISTORY_SIZE - dictSize, 1, dictSize, dict);
+    fclose(dict);
+  }
 
   // parse all blocks until blockSize == 0
   while (1)
@@ -310,16 +338,36 @@ int main(int argc, const char* argv[])
 {
   // default input/output streams
   in = stdin; out = stdout;
+  const char* dictionary = NULL;
 
   // first command-line parameter is our input filename / but ignore "-" which stands for STDIN
-  if (argc == 2 && argv[1][0] != '-' && argv[1][1] != '\0')
+  for (int parameter = 1; parameter < argc; parameter++)
   {
-    in = fopen(argv[1], "rb");
-    if (!in)
-      error("file not found");
+    const char* current = argv[parameter];
+    // dictionary
+    if (current[0] == '-' && current[1] == 'D')
+    {
+      if (parameter + 1 >= argc)
+        error("no dictionary filename found");
+      dictionary = argv[++parameter];
+      continue;
+    }
+
+    // filename
+    // read from STDIN, default behavior
+    if (current[0] != '-' && current[1] != '\0')
+    {
+      // already have a filename - at most one filename is allowed (except for dictionary) ?
+      if (in != stdin)
+        error("can only decompress one file at a time");
+      // get handle
+      in = fopen(argv[1], "rb");
+      if (!in)
+        error("file not found");
+    }
   }
 
   // and go !
-  unlz4(getByteFromIn, sendBytesToOut);
+  unlz4(getByteFromIn, sendBytesToOut, dictionary);
   return 0;
 }

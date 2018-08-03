@@ -33,6 +33,7 @@
     then all you have to do is:
     #include "smallz4.h"
     smallz4::lz4(GET_BYTES, SEND_BYTES);
+    // for more advanced stuff, you can call lz4 with four parameters (incl. max chain length and a dictionary)
 **/
 class smallz4
 {
@@ -44,16 +45,25 @@ public:
 
 
   /// compress everything in input stream (accessed via getByte) and write to output stream (via send)
-  static void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes, unsigned int maxChainLength = MaxChainLength)
+  static void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes,
+                  unsigned int maxChainLength = MaxChainLength) // this function exists for compatibility reasons
+  {
+    lz4(getBytes, sendBytes, maxChainLength, std::vector<unsigned char>());
+  }
+
+  /// compress everything in input stream (accessed via getByte) and write to output stream (via send)
+  static void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes,
+                  unsigned int maxChainLength,
+                  const std::vector<unsigned char>& dictionary) // new interface, supports a predefined dictionary
   {
     smallz4 obj(maxChainLength);
-    obj.compress(getBytes, sendBytes);
+    obj.compress(getBytes, sendBytes, dictionary);
   }
 
   /// version string
   static const char* const getVersion()
   {
-    return "1.1";
+    return "1.2";
   }
 
 
@@ -161,7 +171,7 @@ private:
     // don't match beyond this point
     const unsigned char* const stop    = current + end - pos;
 
-    // get distance to previous match, abort if -1 => not existing
+    // get distance to previous match, abort if 0 => not existing
     Distance distance = previous[pos % PreviousSize];
     size_t totalDistance = 0;
     while (distance != NoPrevious)
@@ -426,8 +436,8 @@ private:
   }
 
 
-  /// compress everything in input stream (accessed via getByte) and write to output stream (via send)
-  void compress(GET_BYTES getBytes, SEND_BYTES sendBytes) const
+  /// compress everything in input stream (accessed via getByte) and write to output stream (via send), improve compression with a predefined dictionary
+  void compress(GET_BYTES getBytes, SEND_BYTES sendBytes, const std::vector<unsigned char>& dictionary) const
   {
     // ==================== write header ====================
     // magic bytes
@@ -472,9 +482,33 @@ private:
     // first and last offset of a block (next is end-of-block plus 1)
     size_t lastBlock = 0;
     size_t nextBlock = 0;
+    bool parseDictionary = !dictionary.empty();
     while (true)
     {
       // ==================== start new block ====================
+      // first byte of the currently processed block (std::vector data may contain the last 64k of the previous block, too)
+      const unsigned char* dataBlock = NULL;
+
+      // prepend dictionary
+      if (parseDictionary)
+      {
+        // prepend exactly 64k
+        const size_t MaxDictionary = 65536;
+        if (dictionary.size() < MaxDictionary)
+        {
+          // add garbage data
+          size_t unused = 65536 - dictionary.size();
+          data.resize(unused, 0);
+          data.insert(data.end(), dictionary.begin(), dictionary.end());
+        }
+        else
+          // copy only the most recent 64k of the dictionary
+          data.insert(data.end(), dictionary.begin() + dictionary.size() - MaxDictionary, dictionary.end());
+
+        nextBlock = data.size();
+        numRead   = data.size();
+      }
+
       // read more bytes from input
       while (numRead - nextBlock < MaxBlockSize)
       {
@@ -498,9 +532,10 @@ private:
       if (nextBlock > numRead)
         nextBlock = numRead;
 
-      const size_t blockSize = nextBlock - lastBlock;
       // first byte of the currently processed block (std::vector data may contain the last 64k of the previous block, too)
-      const unsigned char* const dataBlock = &data[lastBlock - dataZero];
+      dataBlock = &data[lastBlock - dataZero];
+
+      const size_t blockSize = nextBlock - lastBlock;
 
       // ==================== full match finder ====================
 
@@ -515,8 +550,10 @@ private:
 
       // the last literals of the previous block skipped matching, so they are missing from the hash chains
       int lookback = (int)dataZero;
-      if (lookback > BlockEndNoMatch)
+      if (lookback > BlockEndNoMatch && !parseDictionary)
         lookback = BlockEndNoMatch;
+      if (parseDictionary)
+        lookback = (int)dictionary.size();
       // so let's go back a few bytes
       lookback = -lookback;
 
@@ -640,6 +677,9 @@ private:
         }
       }
 
+      // dictionary applies only to the first block
+      parseDictionary = false;
+
       // ==================== estimate costs (number of compressed bytes) ====================
 
       // not needed in greedy mode and/or very short blocks
@@ -668,7 +708,7 @@ private:
       unsigned char num4 = (numBytesTagged >> 24)  & 0xFF; sendBytes(&num4, 1);
 
       if (useCompression)
-        sendBytes(&block[0], numBytes);
+        sendBytes(&block[0],                   numBytes);
       else // uncompressed ? => copy input data
         sendBytes(&data[lastBlock - dataZero], numBytes);
 

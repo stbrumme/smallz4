@@ -38,10 +38,10 @@
 
 
 /// error handler
-static void error(const char* msg)
+static void error(const char* msg, int code = 1)
 {
   fprintf(stderr, "ERROR: %s\n", msg);
-  exit(1);
+  exit(code);
 }
 
 
@@ -95,6 +95,7 @@ static void showHelp(const char* program)
     "  -0, -1 ... -9   Set compression level, default: 9 (see below)\n"
     "  -h              Display this help message\n"
     "  -f              Overwrite an existing file\n"
+    "  -D [FILE]       Load dictionary\n"
     "\n"
     "Compression levels:\n"
     " -0               No compression\n"
@@ -124,9 +125,12 @@ int main(int argc, const char* argv[])
 
   // overwrite output ?
   bool overwrite = false;
+  // preload dictionary from disk
+  const char* dictionary = NULL;
 
   // parse flags
   int nextArgument = 1;
+  bool skipArgument = false;
   while (argc > nextArgument && argv[nextArgument][0] == '-')
   {
     int argPos = 1;
@@ -142,6 +146,14 @@ int main(int argc, const char* argv[])
       // force overwrite
       case 'f':
         overwrite = true;
+        break;
+
+      // use dictionary
+      case 'D':
+        if (nextArgument + 1 >= argc)
+          error("no dictionary filename found");
+        dictionary = argv[nextArgument + 1]; // TODO: any flag immediately after -D causes an error
+        skipArgument = true;
         break;
 
       // set compression level
@@ -160,6 +172,8 @@ int main(int argc, const char* argv[])
     }
 
     nextArgument++;
+    if (skipArgument)
+      nextArgument++;
   }
 
   // default input/output streams
@@ -186,7 +200,31 @@ int main(int argc, const char* argv[])
       error("cannot create file");
   }
 
+  // load dictionary
+  std::vector<unsigned char> preload;
+  if (dictionary != NULL)
+  {
+    // open dictionary
+    FILE* dict = fopen(dictionary, "rb");
+    if (!dict)
+      error("cannot open dictionary");
+
+    // get dictionary's filesize
+    fseek(dict, 0, SEEK_END);
+    size_t dictSize = ftell(dict);
+    // only the last 64k are relevant
+    size_t relevant = dictSize < 65536 ? 0 : dictSize - 65536;
+    fseek(dict, (long)relevant, SEEK_SET);
+    if (dictSize > 65536)
+      dictSize = 65536;
+
+    // read those bytes
+    preload.resize(dictSize);
+    fread(&preload[0], 1, dictSize, dict);
+    fclose(dict);
+  }
+
   // and go !
-  smallz4::lz4(getBytesFromIn, sendBytesToOut, maxChainLength);
+  smallz4::lz4(getBytesFromIn, sendBytesToOut, maxChainLength, preload);
   return 0;
 }
