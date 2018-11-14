@@ -23,6 +23,9 @@
 
 // This program is a shorter, more readable, albeit slower re-implementation of lz4cat ( https://github.com/Cyan4973/xxHash )
 
+// compile: gcc smallz4cat.c -O3 -o smallz4cat -Wall -pedantic -std=c99 -s
+// The static 8k binary was compiled using Clang and dietlibc (see https://www.fefe.de/dietlibc/ )
+
 // Limitations:
 // - skippable frames and legacy frames are not implemented (and most likely never will)
 // - checksums are not verified (see https://create.stephan-brumme.com/xxhash/ for a simple implementation)
@@ -38,11 +41,18 @@
 #include <stdlib.h> // exit()
 #include <string.h> // memcpy
 
+#ifndef FALSE
+#define FALSE 0
+#define TRUE  1
+#endif
 
 /// error handler
 void error(const char* msg)
 {
-  fprintf(stderr, "ERROR: %s\n", msg);
+  // smaller static binary than fprintf(stderr, "ERROR: %s\n", msg);
+  fputs("ERROR: ", stderr);
+  fputs(msg,       stderr);
+  fputs("\n",      stderr);
   exit(1);
 }
 
@@ -105,10 +115,10 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
   if (!isModern && !isLegacy)
     error("invalid signature");
 
-  unsigned char hasBlockChecksum   = 0;
-  unsigned char hasContentSize     = 0;
-  unsigned char hasContentChecksum = 0;
-  unsigned char hasDictionaryID    = 0;
+  unsigned char hasBlockChecksum   = FALSE;
+  unsigned char hasContentSize     = FALSE;
+  unsigned char hasContentChecksum = FALSE;
+  unsigned char hasDictionaryID    = FALSE;
   if (isModern)
   {
     // flags
@@ -192,6 +202,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
     {
       // decompress block
       uint32_t blockOffset = 0;
+      uint32_t numWritten = 0;
       while (blockOffset < blockSize)
       {
         // get a token
@@ -223,6 +234,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
           if (pos == HISTORY_SIZE)
           {
             sendBytes(history, HISTORY_SIZE);
+            numWritten += HISTORY_SIZE;
             pos = 0;
           }
         }
@@ -283,6 +295,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
             {
               // flush output buffer
               sendBytes(history, HISTORY_SIZE);
+              numWritten += HISTORY_SIZE;
               pos = 0;
             }
             // cannot read anymore ? => wrap around
@@ -293,7 +306,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
       }
 
       // all legacy blocks must be completely filled - except for the last one
-      if (isLegacy && blockSize < 8*1024*1024)
+      if (isLegacy && numWritten + pos < 8*1024*1024)
         break;
     }
     else

@@ -23,8 +23,8 @@
 
 #pragma once
 
-#include <stdint.h> // uint16_t, uint32_t, ...
-#include <cstdlib>  // size_t
+#include <inttypes.h> // uint16_t, uint32_t, ...
+#include <cstdlib>    // size_t
 #include <vector>
 
 /// LZ4 compression with optimal parsing
@@ -46,7 +46,8 @@ public:
 
   /// compress everything in input stream (accessed via getByte) and write to output stream (via send)
   static void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes,
-                  unsigned int maxChainLength = MaxChainLength) // this function exists for compatibility reasons
+                  unsigned int maxChainLength = MaxChainLength,
+                  bool useLegacyFormat = false)  // this function exists for compatibility reasons
   {
     lz4(getBytes, sendBytes, maxChainLength, std::vector<unsigned char>());
   }
@@ -54,16 +55,17 @@ public:
   /// compress everything in input stream (accessed via getByte) and write to output stream (via send)
   static void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes,
                   unsigned int maxChainLength,
-                  const std::vector<unsigned char>& dictionary) // new interface, supports a predefined dictionary
+                  const std::vector<unsigned char>& dictionary, // predefined dictionary
+                  bool useLegacyFormat = false)                 // old format is 7 bytes smaller if input < 8 MB
   {
     smallz4 obj(maxChainLength);
-    obj.compress(getBytes, sendBytes, dictionary);
+    obj.compress(getBytes, sendBytes, dictionary, useLegacyFormat);
   }
 
   /// version string
   static const char* const getVersion()
   {
-    return "1.2";
+    return "1.3";
   }
 
 
@@ -108,14 +110,20 @@ private:
     /// stop match finding after MaxChainLength steps (default is unlimited => optimal parsing)
     MaxChainLength = NoPrevious,
 
+    /// significantly speed up parsing if the same byte is repeated a lot, may cause sub-optimal compression
+    MaxSameLetter  =   19 + 255*256, // was: 19 + 255,
+
     /// refer to location of the previous match (implicit hash chain)
     PreviousSize   = 1 << 16,
 
     /// maximum block size as defined in LZ4 spec: { 0,0,0,0,64*1024,256*1024,1024*1024,4*1024*1024 }
     /// I only work with the biggest maximum block size (7)
-    MaxBlockSizeId = 7,          
-    MaxBlockSize   = 4*1024*1024
-    // note: xxhash header checksum is precalculated only for 7, too
+    //  note: xxhash header checksum is precalculated only for 7, too
+    MaxBlockSizeId = 7,
+    MaxBlockSize   = 4*1024*1024,
+
+    /// legacy format has a fixed block size of 8 MB
+    MaxBlockSizeLegacy = 8*1024*1024
   };
 
   //  ----- one and only variable ... -----
@@ -359,8 +367,8 @@ private:
     // "cost" represents the number of bytes needed
 
     // backwards optimal parsing
-    size_t posLastMatch = matches.size();
-    for (int i = (int)matches.size() - (1 + BlockEndLiterals); i >= 0; i--) // ignore the last 5 bytes, they are always literals
+    size_t posLastMatch = blockEnd;
+    for (int i = (int)blockEnd - (1 + BlockEndLiterals); i >= 0; i--) // ignore the last 5 bytes, they are always literals
     {
       // watch out for long literal strings that need extra bytes
       const Length numLiterals = Length(posLastMatch - i);
@@ -387,8 +395,8 @@ private:
         Cost currentCost = cost[i + length] + 1 + 2;
 
         // very long matches need extra bytes for encoding match length
-        if (length > 18)
-          currentCost += 1 + (length - 18) / 255;
+        if (length >= 19)
+          currentCost += 1 + (length - 19) / 255;
 
         // better choice ?
         if (currentCost <= minCost)
@@ -411,11 +419,12 @@ private:
         }
 
         // workaround: very long self-referencing matches can slow down the program A LOT
-        if (match.distance == 1 && match.length > 18 + 255)
+        if (match.distance == 1 && match.length >= MaxSameLetter)
         {
           // assume that longest match is always the best match
+          // however, this assumption might not be optimal
           bestLength = match.length;
-          minCost    = cost[i + match.length] + 1 + 2 + 1 + (match.length - 18) / 255;
+          minCost    = cost[i + match.length] + 1 + 2 + 1 + (match.length - 19) / 255;
           break;
         }
       }
@@ -437,22 +446,30 @@ private:
 
 
   /// compress everything in input stream (accessed via getByte) and write to output stream (via send), improve compression with a predefined dictionary
-  void compress(GET_BYTES getBytes, SEND_BYTES sendBytes, const std::vector<unsigned char>& dictionary) const
+  void compress(GET_BYTES getBytes, SEND_BYTES sendBytes, const std::vector<unsigned char>& dictionary, bool useLegacyFormat) const
   {
     // ==================== write header ====================
     // magic bytes
-    const unsigned char magic[4] = { 0x04, 0x22, 0x4D, 0x18 };
-    sendBytes(magic, 4);
+    const unsigned char magic      [4] = { 0x04, 0x22, 0x4D, 0x18 };
+    const unsigned char magicLegacy[4] = { 0x02, 0x21, 0x4C, 0x18 };
+    if (useLegacyFormat)
+    {
+      sendBytes(magicLegacy, sizeof(magicLegacy));
+    }
+    else
+    {
+      sendBytes(magic,       sizeof(magic));
 
-    // flags
-    const unsigned char flags = 1 << 6;
-    sendBytes(&flags, 1);
-    // max blocksize
-    const unsigned char maxBlockSizeId = MaxBlockSizeId << 4;
-    sendBytes(&maxBlockSizeId, 1);
-    // header checksum (precomputed)
-    const unsigned char checksum = 0xDF;
-    sendBytes(&checksum, 1);
+      // flags
+      const unsigned char flags = 1 << 6;
+      sendBytes(&flags, 1);
+      // max blocksize
+      const unsigned char maxBlockSizeId = MaxBlockSizeId << 4;
+      sendBytes(&maxBlockSizeId, 1);
+      // header checksum (precomputed)
+      const unsigned char checksum = 0xDF;
+      sendBytes(&checksum, 1);
+    }
 
     // ==================== declarations ====================
     // read the file in chunks/blocks, data will contain only bytes which are relevant for the current block
@@ -467,9 +484,9 @@ private:
 
     // last time we saw a hash
     const uint32_t HashSize   = 1 << HashBits;
-    const size_t   NoLastHash = MaxDistance + 1;
+    const size_t   NoLastHash = 0x7FFFFFFF;
     std::vector<size_t> lastHash(HashSize, NoLastHash);
-    const uint32_t HashMultiplier = 22695477; // taken from https://en.wikipedia.org/wiki/Linear_congruential_generator
+    const uint64_t HashMultiplier = 22695477; // taken from https://en.wikipedia.org/wiki/Linear_congruential_generator
     const uint8_t  HashShift  = 32 - HashBits;
 
     // previous position which starts with the same bytes
@@ -510,9 +527,10 @@ private:
       }
 
       // read more bytes from input
-      while (numRead - nextBlock < MaxBlockSize)
+      size_t maxBlockSize = useLegacyFormat ? MaxBlockSizeLegacy : MaxBlockSize;
+      while (numRead - nextBlock < maxBlockSize)
       {
-        // buffer can be significantly smaller than MaxBLockSize, that's the only reason for this while-block
+        // buffer can be significantly smaller than MaxBlockSize, that's the only reason for this while-block
         size_t incoming = getBytes(&buffer[0], buffer.size());
         if (incoming == 0)
           break;
@@ -527,7 +545,7 @@ private:
 
       // determine block borders
       lastBlock  = nextBlock;
-      nextBlock += MaxBlockSize;
+      nextBlock += maxBlockSize;
       // not beyond end-of-file
       if (nextBlock > numRead)
         nextBlock = numRead;
@@ -556,6 +574,9 @@ private:
         lookback = (int)dictionary.size();
       // so let's go back a few bytes
       lookback = -lookback;
+      // ... but not in legacy mode
+      if (useLegacyFormat)
+        lookback = 0;
 
       std::vector<Match> matches(blockSize);
       // find longest matches for each position
@@ -570,7 +591,7 @@ private:
         {
           Match prevMatch = matches[i - 1];
           // predecessor had the same match ?
-          if (prevMatch.distance == 1 && prevMatch.length > 1024) // TODO: handle very long self-referencing matches
+          if (prevMatch.distance == 1 && prevMatch.length > MaxSameLetter) // TODO: handle very long self-referencing matches
           {
             // just copy predecessor without further (expensive) optimizations
             prevMatch.length--;
@@ -582,16 +603,15 @@ private:
         // read next four bytes
         uint32_t four = *(uint32_t*)(dataBlock + i);
         // convert to a shorter hash
-        uint32_t hash = (four * HashMultiplier) >> HashShift;
+        uint32_t hash = ((four * HashMultiplier) >> HashShift) & (HashSize - 1);
 
         // get last occurrence of these bits
         size_t last = lastHash[hash];
         // and store current position
         lastHash[hash] = i + lastBlock;
 
-        int prevIndex = i % PreviousSize;
-        if (i < 0)
-          prevIndex = (i + MaxBlockSize) % PreviousSize;
+        // remember: i could be negative, too
+        int prevIndex = (i + PreviousSize) % PreviousSize;
 
         // no predecessor or too far away ?
         size_t distance = i + lastBlock - last;
@@ -614,7 +634,7 @@ private:
             break;
 
           // prevent from accidently hopping on an old, wrong hash chain
-          uint32_t curHash = (curFour * HashMultiplier) >> HashShift;
+          uint32_t curHash = ((curFour * HashMultiplier) >> HashShift) & (HashSize - 1);
           if (curHash != hash)
           {
             distance = NoPrevious;
@@ -697,7 +717,9 @@ private:
       // automatically decide whether compressed or uncompressed
       size_t uncompressedSize = nextBlock - lastBlock;
       // did compression do harm ?
-      bool useCompression = block.size() < uncompressedSize && !uncompressed;
+      bool   useCompression   = block.size() < uncompressedSize && !uncompressed;
+      // legacy format is always compressed
+      useCompression |= useLegacyFormat;
 
       // block size
       uint32_t numBytes = uint32_t(useCompression ? block.size() : uncompressedSize);
@@ -712,17 +734,38 @@ private:
       else // uncompressed ? => copy input data
         sendBytes(&data[lastBlock - dataZero], numBytes);
 
-      // remove already processed data except for the last 64kb which could be used for intra-block matches
-      if (data.size() > MaxDistance)
+      // legacy format: no matching across blocks
+      if (useLegacyFormat)
       {
-        size_t remove = data.size() - MaxDistance;
-        dataZero += remove;
-        data.erase(data.begin(), data.begin() + remove);
+        dataZero += data.size();
+        data.clear();
+
+        // clear hash tables
+        for (size_t i = 0; i < previousHash.size(); i++)
+        {
+          previousHash [i] = NoPrevious;
+          previousExact[i] = NoPrevious;
+        }
+        for (size_t i = 0; i < lastHash.size(); i++)
+          lastHash[i] = NoLastHash;
+      }
+      else
+      {
+        // remove already processed data except for the last 64kb which could be used for intra-block matches
+        if (data.size() > MaxDistance)
+        {
+          size_t remove = data.size() - MaxDistance;
+          dataZero += remove;
+          data.erase(data.begin(), data.begin() + remove);
+        }
       }
     }
 
     // add an empty block
-    uint32_t zero = 0;
-    sendBytes(&zero, 4);
+    if (!useLegacyFormat)
+    {
+      uint32_t zero = 0;
+      sendBytes(&zero, 4);
+    }
   }
 };

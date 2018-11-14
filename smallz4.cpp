@@ -27,10 +27,11 @@
 #include "smallz4.h"
 
 #include <cstdio>     // stdin/stdout/stderr, fopen, ...
-#include <cstdlib>    // exit
+
 #ifdef _WIN32
   #include <io.h>     // isatty()
 #else
+  #include <cstdlib>  // exit
   #include <unistd.h> // isatty()
   #define _fileno fileno
   #define _isatty isatty
@@ -95,13 +96,14 @@ static void showHelp(const char* program)
     "  -0, -1 ... -9   Set compression level, default: 9 (see below)\n"
     "  -h              Display this help message\n"
     "  -f              Overwrite an existing file\n"
+    "  -l              Use LZ4 legacy file format\n"
     "  -D [FILE]       Load dictionary\n"
     "\n"
     "Compression levels:\n"
     " -0               No compression\n"
     " -1 ... -%d        Greedy search, check 1 to %d matches\n"
     " -%d ... -8        Lazy matching with optimal parsing, check %d to 8 matches\n"
-    " -9               Optimal parsing, check all possible matches\n"
+    " -9               Optimal parsing, check all possible matches (default)\n"
     "\n"
     "Written in 2016-2018 by Stephan Brumme https://create.stephan-brumme.com/smallz4/\n"
     , smallz4::getVersion()
@@ -125,6 +127,8 @@ int main(int argc, const char* argv[])
 
   // overwrite output ?
   bool overwrite = false;
+  // legacy format ? (not recommended, but smaller files if input < 8 MB)
+  bool useLegacy = false;
   // preload dictionary from disk
   const char* dictionary = NULL;
 
@@ -146,6 +150,11 @@ int main(int argc, const char* argv[])
       // force overwrite
       case 'f':
         overwrite = true;
+        break;
+
+      // old LZ4 format
+      case 'l':
+        useLegacy = true;
         break;
 
       // use dictionary
@@ -200,6 +209,15 @@ int main(int argc, const char* argv[])
       error("cannot create file");
   }
 
+  // basic check of legacy format's restrictions
+  if (useLegacy)
+  {
+    if (dictionary != 0)
+      error("legacy format doesn't support dictionaries");
+    if (maxChainLength == 0)
+      error("legacy format doesn't support uncompressed files");
+  }
+
   // load dictionary
   std::vector<unsigned char> preload;
   if (dictionary != NULL)
@@ -225,6 +243,6 @@ int main(int argc, const char* argv[])
   }
 
   // and go !
-  smallz4::lz4(getBytesFromIn, sendBytesToOut, maxChainLength, preload);
+  smallz4::lz4(getBytesFromIn, sendBytesToOut, maxChainLength, preload, useLegacy);
   return 0;
 }
