@@ -1,6 +1,6 @@
 // //////////////////////////////////////////////////////////
 // smallz4cat.c
-// Copyright (c) 2016-2018 Stephan Brumme. All rights reserved.
+// Copyright (c) 2016-2019 Stephan Brumme. All rights reserved.
 // see https://create.stephan-brumme.com/smallz4/
 //
 // "MIT License":
@@ -36,7 +36,6 @@
 // suppress warnings when compiled by Visual C++
 #define _CRT_SECURE_NO_WARNINGS
 
-#include <stdint.h> // uint32_t
 #include <stdio.h>  // stdin/stdout/stderr, fopen, ...
 #include <stdlib.h> // exit()
 #include <string.h> // memcpy
@@ -52,7 +51,7 @@ void error(const char* msg)
   // smaller static binary than fprintf(stderr, "ERROR: %s\n", msg);
   fputs("ERROR: ", stderr);
   fputs(msg,       stderr);
-  fputs("\n",      stderr);
+  fputc('\n',      stderr);
   exit(1);
 }
 
@@ -73,8 +72,8 @@ static unsigned char getByteFromIn()
   // modify buffer size as you like ... for most use cases, bigger buffer aren't faster anymore - and even reducing to 1 byte works !
 #define READ_BUFFER_SIZE 4*1024
   static unsigned char readBuffer[READ_BUFFER_SIZE];
-  static size_t        pos       = 0;
-  static size_t        available = 0;
+  static unsigned int  pos       = 0;
+  static unsigned int  available = 0;
 
   // refill buffer
   if (pos == available)
@@ -109,9 +108,9 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
   unsigned char signature2 = getByte();
   unsigned char signature3 = getByte();
   unsigned char signature4 = getByte();
-  uint32_t signature = (signature4 << 24) | (signature3 << 16) | (signature2 << 8) | signature1;
-  int isModern = (signature == 0x184D2204);
-  int isLegacy = (signature == 0x184C2102);
+  unsigned int  signature  = (signature4 << 24) | (signature3 << 16) | (signature2 << 8) | signature1;
+  unsigned char isModern   = (signature == 0x184D2204);
+  unsigned char isLegacy   = (signature == 0x184C2102);
   if (!isModern && !isLegacy)
     error("invalid signature");
 
@@ -169,10 +168,10 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
 
     // get dictionary's filesize
     fseek(dict, 0, SEEK_END);
-    size_t dictSize = ftell(dict);
+    long dictSize = ftell(dict);
     // only the last 64k are relevant
-    size_t relevant = dictSize < 65536 ? 0 : dictSize - 65536;
-    fseek(dict, (long)relevant, SEEK_SET);
+    long relevant = dictSize < 65536 ? 0 : dictSize - 65536;
+    fseek(dict, relevant, SEEK_SET);
     if (dictSize > 65536)
       dictSize = 65536;
     // read it and store it at the end of the buffer
@@ -184,10 +183,10 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
   while (1)
   {
     // block size
-    uint32_t blockSize = getByte();
-    blockSize |= (uint32_t)getByte() <<  8;
-    blockSize |= (uint32_t)getByte() << 16;
-    blockSize |= (uint32_t)getByte() << 24;
+    unsigned int blockSize = getByte();
+    blockSize |= (unsigned int)getByte() <<  8;
+    blockSize |= (unsigned int)getByte() << 16;
+    blockSize |= (unsigned int)getByte() << 24;
 
     // highest bit set ?
     unsigned char isCompressed = isLegacy || (blockSize & 0x80000000) == 0;
@@ -201,17 +200,16 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
     if (isCompressed)
     {
       // decompress block
-      uint32_t blockOffset = 0;
-      uint32_t numWritten = 0;
+      unsigned int blockOffset = 0;
+      unsigned int numWritten  = 0;
       while (blockOffset < blockSize)
       {
         // get a token
         unsigned char token = getByte();
-
         blockOffset++;
 
         // determine number of literals
-        uint32_t numLiterals = (token >> 4) & 0x0F;
+        unsigned int numLiterals = token >> 4;
         if (numLiterals == 15)
         {
           // number of literals length encoded in more than 1 byte
@@ -225,17 +223,28 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
         }
 
         blockOffset += numLiterals;
-        // copy all those literals
-        while (numLiterals-- > 0)
-        {
-          history[pos++] = getByte();
 
-          // flush output buffer
-          if (pos == HISTORY_SIZE)
+        // copy all those literals
+        if (pos + numLiterals < HISTORY_SIZE)
+        {
+          // fast loop
+          while (numLiterals-- > 0)
+            history[pos++] = getByte();
+        }
+        else
+        {
+          // slow loop
+          while (numLiterals-- > 0)
           {
-            sendBytes(history, HISTORY_SIZE);
-            numWritten += HISTORY_SIZE;
-            pos = 0;
+            history[pos++] = getByte();
+
+            // flush output buffer
+            if (pos == HISTORY_SIZE)
+            {
+              sendBytes(history, HISTORY_SIZE);
+              numWritten += HISTORY_SIZE;
+              pos = 0;
+            }
           }
         }
 
@@ -243,16 +252,16 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
         if (blockOffset == blockSize)
           break;
 
-        // match distance is encoded by two bytes (little endian)
-        blockOffset += 2;
-        uint32_t delta = getByte();
-        delta |= (uint32_t)getByte() << 8;
+        // match distance is encoded in two bytes (little endian)
+        unsigned int delta = getByte();
+        delta |= (unsigned int)getByte() << 8;
         // zero isn't allowed
         if (delta == 0)
           error("invalid offset");
+        blockOffset += 2;
 
-        // match length (must be >= 4, therefore length is stored minus 4)
-        uint32_t matchLength = 4 + (token & 0x0F);
+        // match length (always >= 4, therefore length is stored minus 4)
+        unsigned int matchLength = 4 + (token & 0x0F);
         if (matchLength == 4 + 0x0F)
         {
           unsigned char current;
@@ -265,30 +274,32 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
         }
 
         // copy match
-        uint32_t reference = (pos >= delta) ? pos - delta : HISTORY_SIZE + pos - delta;
-        if (pos + matchLength < HISTORY_SIZE && reference + matchLength < HISTORY_SIZE)
+        unsigned int referencePos = (pos >= delta) ? (pos - delta) : (HISTORY_SIZE + pos - delta);
+        // start and end within the current 64k block ?
+        if (pos + matchLength < HISTORY_SIZE && referencePos + matchLength < HISTORY_SIZE)
         {
+          // read/write continuous block (no wrap-around at the end of history[])
           // fast copy
-          if (pos >= reference + matchLength || reference >= pos + matchLength)
+          if (pos >= referencePos + matchLength || referencePos >= pos + matchLength)
           {
             // non-overlapping
-            memcpy(history + pos, history + reference, matchLength);
+            memcpy(history + pos, history + referencePos, matchLength);
             pos += matchLength;
           }
           else
           {
-            // overlapping
+            // overlapping, slower byte-wise copy
             while (matchLength-- > 0)
-              history[pos++] = history[reference++];
+              history[pos++] = history[referencePos++];
           }
         }
         else
         {
-          // slower copy, have to take care of buffer limits
+          // either read or write wraps around at the end of history[]
           while (matchLength-- > 0)
           {
             // copy single byte
-            history[pos++] = history[reference++];
+            history[pos++] = history[referencePos++];
 
             // cannot write anymore ? => wrap around
             if (pos == HISTORY_SIZE)
@@ -298,9 +309,8 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
               numWritten += HISTORY_SIZE;
               pos = 0;
             }
-            // cannot read anymore ? => wrap around
-            if (reference == HISTORY_SIZE)
-              reference = 0;
+            // wrap-around of read location
+            referencePos %= HISTORY_SIZE;
           }
         }
       }
@@ -354,7 +364,8 @@ int main(int argc, const char* argv[])
   const char* dictionary = NULL;
 
   // first command-line parameter is our input filename / but ignore "-" which stands for STDIN
-  for (int parameter = 1; parameter < argc; parameter++)
+  int parameter;
+  for (parameter = 1; parameter < argc; parameter++)
   {
     const char* current = argv[parameter];
     // dictionary

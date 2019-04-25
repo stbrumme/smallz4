@@ -1,6 +1,6 @@
 // //////////////////////////////////////////////////////////
 // smallz4.cpp
-// Copyright (c) 2016-2018 Stephan Brumme. All rights reserved.
+// Copyright (c) 2016-2019 Stephan Brumme. All rights reserved.
 // see https://create.stephan-brumme.com/smallz4/
 //
 // "MIT License":
@@ -105,11 +105,11 @@ static void showHelp(const char* program)
     " -%d ... -8        Lazy matching with optimal parsing, check %d to 8 matches\n"
     " -9               Optimal parsing, check all possible matches (default)\n"
     "\n"
-    "Written in 2016-2018 by Stephan Brumme https://create.stephan-brumme.com/smallz4/\n"
+    "Written in 2016-2019 by Stephan Brumme https://create.stephan-brumme.com/smallz4/\n"
     , smallz4::getVersion()
-    , program, program, program, program, program, program, program, program,
-    smallz4::ShortChainsGreedy,     smallz4::ShortChainsGreedy,
-    smallz4::ShortChainsGreedy + 1, smallz4::ShortChainsGreedy + 1);
+    , program, program, program, program, program, program, program, program
+    , smallz4::ShortChainsGreedy,     smallz4::ShortChainsGreedy
+    , smallz4::ShortChainsGreedy + 1, smallz4::ShortChainsGreedy + 1);
 }
 
 
@@ -123,7 +123,7 @@ int main(int argc, const char* argv[])
     return 0;
   }
 
-  unsigned int maxChainLength = 65536; // "unlimited" because search window contains only 2^16 bytes
+  unsigned short maxChainLength = 65535; // "unlimited" because search window contains only 2^16 bytes
 
   // overwrite output ?
   bool overwrite = false;
@@ -231,10 +231,11 @@ int main(int argc, const char* argv[])
     fseek(dict, 0, SEEK_END);
     size_t dictSize = ftell(dict);
     // only the last 64k are relevant
-    size_t relevant = dictSize < 65536 ? 0 : dictSize - 65536;
+    const size_t Last64k = 65536;
+    size_t relevant = dictSize < Last64k ? 0 : dictSize - Last64k;
     fseek(dict, (long)relevant, SEEK_SET);
-    if (dictSize > 65536)
-      dictSize = 65536;
+    if (dictSize > Last64k)
+      dictSize = Last64k;
 
     // read those bytes
     preload.resize(dictSize);
