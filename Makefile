@@ -14,13 +14,13 @@ CPP = g++
 
 # compiler flags
 # add -m32 if you want 32bit binaries (or add to EXTRAFLAGS via command-line)
-CCFLAGS   = -O3 -Wall -pedantic -s -std=c99
-CPPFLAGS  = -O3 -Wall -pedantic -s
+CCFLAGS   = -O2 -Wall -pedantic -s -std=c99
+CPPFLAGS  = -O2 -Wall -pedantic -s
 
 # you need dietlibc for super-small portable (=static) binaries: https://www.fefe.de/dietlibc/
 # compiler flags are explained here: http://ptspts.blogspot.com/2013/12/how-to-make-smaller-c-and-c-binaries.html
 # NOTE: -Os instead of -O3 saves about 100 bytes (CLang) or 3kb (GCC) - but decompression speed is >20% worse
-TINYFLAGS = $(CCFLAGS) -s -std=c99 -static -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -Wl,--gc-sections 
+TINYFLAGS = $(CCFLAGS) -s -std=c99 -static -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -Wl,--gc-sections
 TINYFLAGS+= -fno-ident
 TINYCAT   = tiny-smallz4cat$(EXTRAFLAGS)
 

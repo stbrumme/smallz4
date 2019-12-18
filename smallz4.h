@@ -24,6 +24,7 @@
 #pragma once
 
 #include <inttypes.h> // uint16_t, uint32_t, ...
+#include <cstdlib>    // size_t
 #include <vector>
 
 /// LZ4 compression with optimal parsing
@@ -38,27 +39,28 @@ class smallz4
 {
 public:
   // read  several bytes, see getBytesFromIn() in smallz4.cpp for a basic implementation
-  typedef size_t (*GET_BYTES) (      void* data, size_t numBytes);
+  typedef size_t (*GET_BYTES) (      void* data, size_t numBytes, void* userPtr);
   // write several bytes, see sendBytesToOut() in smallz4.cpp for a basic implementation
-  typedef void   (*SEND_BYTES)(const void* data, size_t numBytes);
-
+  typedef void   (*SEND_BYTES)(const void* data, size_t numBytes, void* userPtr);
 
   /// compress everything in input stream (accessed via getByte) and write to output stream (via send)
   static void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes,
                   unsigned short maxChainLength = MaxChainLength,
-                  bool useLegacyFormat = false)  // this function exists for compatibility reasons
+                  bool useLegacyFormat = false,
+                  void* userPtr = NULL)
   {
-    lz4(getBytes, sendBytes, maxChainLength, std::vector<unsigned char>());
+    lz4(getBytes, sendBytes, maxChainLength, std::vector<unsigned char>(), useLegacyFormat, userPtr);
   }
 
   /// compress everything in input stream (accessed via getByte) and write to output stream (via send)
   static void lz4(GET_BYTES getBytes, SEND_BYTES sendBytes,
                   unsigned short maxChainLength,
                   const std::vector<unsigned char>& dictionary, // predefined dictionary
-                  bool useLegacyFormat = false)                 // old format is 7 bytes smaller if input < 8 MB
+                  bool useLegacyFormat = false,                 // old format is 7 bytes smaller if input < 8 MB
+                  void* userPtr = NULL)
   {
     smallz4 obj(maxChainLength);
-    obj.compress(getBytes, sendBytes, dictionary, useLegacyFormat);
+    obj.compress(getBytes, sendBytes, dictionary, useLegacyFormat, userPtr);
   }
 
   /// version string
@@ -103,22 +105,22 @@ private:
     HashSize          = 1 << HashBits,
 
     /// input buffer size, can be any number but zero ;-)
-    BufferSize     = 64*1024,
+    BufferSize        = 64*1024,
 
     /// maximum match distance, must be power of 2 minus 1
-    MaxDistance    =   65535,
+    MaxDistance       =   65535,
     /// marker for "no match"
-    EndOfChain     =       0,
+    EndOfChain        =       0,
     /// stop match finding after MaxChainLength steps (default is unlimited => optimal parsing)
-    MaxChainLength = MaxDistance,
+    MaxChainLength    = MaxDistance,
 
     /// significantly speed up parsing if the same byte is repeated a lot, may cause sub-optimal compression
-    MaxSameLetter  =   19 + 255*256, // was: 19 + 255,
+    MaxSameLetter     =   19 + 255*256, // was: 19 + 255,
 
     /// maximum block size as defined in LZ4 spec: { 0,0,0,0,64*1024,256*1024,1024*1024,4*1024*1024 }
     /// I only work with the biggest maximum block size (7)
     //  note: xxhash header checksum is precalculated only for 7, too
-    MaxBlockSizeId = 7,
+    MaxBlockSizeId    = 7,
     MaxBlockSize   = 4*1024*1024,
 
     /// legacy format has a fixed block size of 8 MB
@@ -470,14 +472,14 @@ private:
 
 
   /// compress everything in input stream (accessed via getByte) and write to output stream (via send), improve compression with a predefined dictionary
-  void compress(GET_BYTES getBytes, SEND_BYTES sendBytes, const std::vector<unsigned char>& dictionary, bool useLegacyFormat) const
+  void compress(GET_BYTES getBytes, SEND_BYTES sendBytes, const std::vector<unsigned char>& dictionary, bool useLegacyFormat, void* userPtr) const
   {
     // ==================== write header ====================
     if (useLegacyFormat)
     {
       // magic bytes
       const unsigned char header[] = { 0x02, 0x21, 0x4C, 0x18 };
-      sendBytes(header, sizeof(header));
+      sendBytes(header, sizeof(header), userPtr);
     }
     else
     {
@@ -489,7 +491,7 @@ private:
         MaxBlockSizeId << 4,    // max blocksize
         0xDF                    // header checksum (precomputed)
       };
-      sendBytes(header, sizeof(header));
+      sendBytes(header, sizeof(header), userPtr);
     }
 
     // ==================== declarations ====================
@@ -571,7 +573,7 @@ private:
       while (numRead - nextBlock < maxBlockSize)
       {
         // buffer can be significantly smaller than MaxBlockSize, that's the only reason for this while-block
-        size_t incoming = getBytes(buffer, BufferSize);
+        size_t incoming = getBytes(buffer, BufferSize, userPtr);
         // no more data ?
         if (incoming == 0)
           break;
@@ -767,15 +769,15 @@ private:
       // block size
       uint32_t numBytes = uint32_t(useCompression ? compressed.size() : blockSize);
       uint32_t numBytesTagged = numBytes | (useCompression ? 0 : 0x80000000);
-      unsigned char num1 =  numBytesTagged         & 0xFF; sendBytes(&num1, 1);
-      unsigned char num2 = (numBytesTagged >>  8)  & 0xFF; sendBytes(&num2, 1);
-      unsigned char num3 = (numBytesTagged >> 16)  & 0xFF; sendBytes(&num3, 1);
-      unsigned char num4 = (numBytesTagged >> 24)  & 0xFF; sendBytes(&num4, 1);
+      unsigned char num1 =  numBytesTagged         & 0xFF; sendBytes(&num1, 1, userPtr);
+      unsigned char num2 = (numBytesTagged >>  8)  & 0xFF; sendBytes(&num2, 1, userPtr);
+      unsigned char num3 = (numBytesTagged >> 16)  & 0xFF; sendBytes(&num3, 1, userPtr);
+      unsigned char num4 = (numBytesTagged >> 24)  & 0xFF; sendBytes(&num4, 1, userPtr);
 
       if (useCompression)
-        sendBytes(compressed.data(),           numBytes);
+        sendBytes(compressed.data(),           numBytes, userPtr);
       else // uncompressed ? => copy input data
-        sendBytes(&data[lastBlock - dataZero], numBytes);
+        sendBytes(&data[lastBlock - dataZero], numBytes, userPtr);
 
       // legacy format: no matching across blocks
       if (useLegacyFormat)
@@ -807,7 +809,7 @@ private:
     if (!useLegacyFormat)
     {
       static const uint32_t zero = 0;
-      sendBytes(&zero, 4);
+      sendBytes(&zero, 4, userPtr);
     }
   }
 };

@@ -31,7 +31,7 @@
 // - checksums are not verified (see https://create.stephan-brumme.com/xxhash/ for a simple implementation)
 
 // Replace getByteFromIn() and sendToOut() by your own code if you need in-memory LZ4 decompression.
-// Corrupted data causes a call to error().
+// Corrupted data causes a call to unlz4error().
 
 // suppress warnings when compiled by Visual C++
 #define _CRT_SECURE_NO_WARNINGS
@@ -46,7 +46,7 @@
 #endif
 
 /// error handler
-void error(const char* msg)
+static void unlz4error(const char* msg)
 {
   // smaller static binary than fprintf(stderr, "ERROR: %s\n", msg);
   fputs("ERROR: ", stderr);
@@ -60,59 +60,67 @@ void error(const char* msg)
 
 
 // read one byte from input, see getByteFromIn()  for a basic implementation
-typedef unsigned char (*GET_BYTE)  ();
+typedef unsigned char (*GET_BYTE)  (void* userPtr);
 // write several bytes,      see sendBytesToOut() for a basic implementation
-typedef void          (*SEND_BYTES)(const unsigned char*, unsigned int);
+typedef void          (*SEND_BYTES)(const unsigned char*, unsigned int, void* userPtr);
 
-/// input stream,  usually stdin
-static FILE* in = NULL;
-/// read a single byte (with simple buffering)
-static unsigned char getByteFromIn()
+struct UserPtr
 {
-  // modify buffer size as you like ... for most use cases, bigger buffer aren't faster anymore - and even reducing to 1 byte works !
+  // file handles
+  FILE* in;
+  FILE* out;
+  // modify input buffer size as you like ... for most use cases, bigger buffer aren't faster anymore - and even reducing to 1 byte works !
 #define READ_BUFFER_SIZE 4*1024
-  static unsigned char readBuffer[READ_BUFFER_SIZE];
-  static unsigned int  pos       = 0;
-  static unsigned int  available = 0;
+  unsigned char readBuffer[READ_BUFFER_SIZE];
+  unsigned int  pos;
+  unsigned int  available;
+};
+
+/// read a single byte (with simple buffering)
+static unsigned char getByteFromIn(void* userPtr) // parameter "userPtr" not needed
+{
+  /// cast user-specific data
+  struct UserPtr* user = (struct UserPtr*)userPtr;
 
   // refill buffer
-  if (pos == available)
+  if (user->pos == user->available)
   {
-    pos = 0;
-    available = fread(readBuffer, 1, READ_BUFFER_SIZE, in);
-    if (available == 0)
-      error("out of data");
+    user->pos = 0;
+    user->available = fread(user->readBuffer, 1, READ_BUFFER_SIZE, user->in);
+    if (user->available == 0)
+      unlz4error("out of data");
   }
 
   // return a byte
-  return readBuffer[pos++];
+  return user->readBuffer[user->pos++];
 }
 
-/// output stream, usually stdout
-static FILE* out = NULL;
 /// write a block of bytes
-static void sendBytesToOut(const unsigned char* data, unsigned int numBytes)
+static void sendBytesToOut(const unsigned char* data, unsigned int numBytes, void* userPtr)
 {
+  /// cast user-specific data
+  struct UserPtr* user = (struct UserPtr*)userPtr;
   if (data != NULL && numBytes > 0)
-    fwrite(data, 1, numBytes, out);
+    fwrite(data, 1, numBytes, user->out);
 }
 
 
 // ==================== LZ4 DECOMPRESSOR ====================
 
+
 /// decompress everything in input stream (accessed via getByte) and write to output stream (via sendBytes)
-void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
+void unlz4_userPtr(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary, void* userPtr)
 {
   // signature
-  unsigned char signature1 = getByte();
-  unsigned char signature2 = getByte();
-  unsigned char signature3 = getByte();
-  unsigned char signature4 = getByte();
+  unsigned char signature1 = getByte(userPtr);
+  unsigned char signature2 = getByte(userPtr);
+  unsigned char signature3 = getByte(userPtr);
+  unsigned char signature4 = getByte(userPtr);
   unsigned int  signature  = (signature4 << 24) | (signature3 << 16) | (signature2 << 8) | signature1;
   unsigned char isModern   = (signature == 0x184D2204);
   unsigned char isLegacy   = (signature == 0x184C2102);
   if (!isModern && !isLegacy)
-    error("invalid signature");
+    unlz4error("invalid signature");
 
   unsigned char hasBlockChecksum   = FALSE;
   unsigned char hasContentSize     = FALSE;
@@ -121,7 +129,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
   if (isModern)
   {
     // flags
-    unsigned char flags = getByte();
+    unsigned char flags = getByte(userPtr);
     hasBlockChecksum   = flags & 16;
     hasContentSize     = flags &  8;
     hasContentChecksum = flags &  4;
@@ -130,25 +138,24 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
     // only version 1 file format
     unsigned char version = flags >> 6;
     if (version != 1)
-      error("only LZ4 file format version 1 supported");
+      unlz4error("only LZ4 file format version 1 supported");
 
     // ignore blocksize
-    getByte();
+    char numIgnore = 1;
 
+    // ignore, skip 8 bytes
     if (hasContentSize)
-    {
-      // ignore, skip 8 bytes
-      getByte(); getByte(); getByte(); getByte();
-      getByte(); getByte(); getByte(); getByte();
-    }
+      numIgnore += 8;
+    // ignore, skip 4 bytes
     if (hasDictionaryID)
-    {
-      // ignore, skip 4 bytes
-      getByte(); getByte(); getByte(); getByte();
-    }
+      numIgnore += 4;
 
     // ignore header checksum (xxhash32 of everything up this point & 0xFF)
-    getByte();
+    numIgnore++;
+
+    // skip all those ignored bytes
+    while (numIgnore--)
+      getByte(userPtr);
   }
 
   // don't lower this value, backreferences can be 64kb far away
@@ -164,7 +171,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
     // open dictionary
     FILE* dict = fopen(dictionary, "rb");
     if (!dict)
-      error("cannot open dictionary");
+      unlz4error("cannot open dictionary");
 
     // get dictionary's filesize
     fseek(dict, 0, SEEK_END);
@@ -183,10 +190,10 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
   while (1)
   {
     // block size
-    unsigned int blockSize = getByte();
-    blockSize |= (unsigned int)getByte() <<  8;
-    blockSize |= (unsigned int)getByte() << 16;
-    blockSize |= (unsigned int)getByte() << 24;
+    unsigned int blockSize = getByte(userPtr);
+    blockSize |= (unsigned int)getByte(userPtr) <<  8;
+    blockSize |= (unsigned int)getByte(userPtr) << 16;
+    blockSize |= (unsigned int)getByte(userPtr) << 24;
 
     // highest bit set ?
     unsigned char isCompressed = isLegacy || (blockSize & 0x80000000) == 0;
@@ -205,7 +212,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
       while (blockOffset < blockSize)
       {
         // get a token
-        unsigned char token = getByte();
+        unsigned char token = getByte(userPtr);
         blockOffset++;
 
         // determine number of literals
@@ -216,7 +223,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
           unsigned char current;
           do
           {
-            current = getByte();
+            current = getByte(userPtr);
             numLiterals += current;
             blockOffset++;
           } while (current == 255);
@@ -229,19 +236,19 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
         {
           // fast loop
           while (numLiterals-- > 0)
-            history[pos++] = getByte();
+            history[pos++] = getByte(userPtr);
         }
         else
         {
           // slow loop
           while (numLiterals-- > 0)
           {
-            history[pos++] = getByte();
+            history[pos++] = getByte(userPtr);
 
             // flush output buffer
             if (pos == HISTORY_SIZE)
             {
-              sendBytes(history, HISTORY_SIZE);
+              sendBytes(history, HISTORY_SIZE, userPtr);
               numWritten += HISTORY_SIZE;
               pos = 0;
             }
@@ -253,11 +260,11 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
           break;
 
         // match distance is encoded in two bytes (little endian)
-        unsigned int delta = getByte();
-        delta |= (unsigned int)getByte() << 8;
+        unsigned int delta = getByte(userPtr);
+        delta |= (unsigned int)getByte(userPtr) << 8;
         // zero isn't allowed
         if (delta == 0)
-          error("invalid offset");
+          unlz4error("invalid offset");
         blockOffset += 2;
 
         // match length (always >= 4, therefore length is stored minus 4)
@@ -267,7 +274,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
           unsigned char current;
           do // match length encoded in more than 1 byte
           {
-            current = getByte();
+            current = getByte(userPtr);
             matchLength += current;
             blockOffset++;
           } while (current == 255);
@@ -305,7 +312,7 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
             if (pos == HISTORY_SIZE)
             {
               // flush output buffer
-              sendBytes(history, HISTORY_SIZE);
+              sendBytes(history, HISTORY_SIZE, userPtr);
               numWritten += HISTORY_SIZE;
               pos = 0;
             }
@@ -325,11 +332,11 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
       while (blockSize-- > 0)
       {
         // copy a byte ...
-        history[pos++] = getByte();
+        history[pos++] = getByte(userPtr);
         // ... until buffer is full => send to output
         if (pos == HISTORY_SIZE)
         {
-          sendBytes(history, HISTORY_SIZE);
+          sendBytes(history, HISTORY_SIZE, userPtr);
           pos = 0;
         }
       }
@@ -338,18 +345,24 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
     if (hasBlockChecksum)
     {
       // ignore checksum, skip 4 bytes
-      getByte(); getByte(); getByte(); getByte();
+      getByte(userPtr); getByte(userPtr); getByte(userPtr); getByte(userPtr);
     }
   }
 
   if (hasContentChecksum)
   {
     // ignore checksum, skip 4 bytes
-    getByte(); getByte(); getByte(); getByte();
+    getByte(userPtr); getByte(userPtr); getByte(userPtr); getByte(userPtr);
   }
 
   // flush output buffer
-  sendBytes(history, pos);
+  sendBytes(history, pos, userPtr);
+}
+
+/// old interface where getByte and sendBytes use global file handles
+void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
+{
+  unlz4_userPtr(getByte, sendBytes, dictionary, NULL);
 }
 
 
@@ -360,7 +373,14 @@ void unlz4(GET_BYTE getByte, SEND_BYTES sendBytes, const char* dictionary)
 int main(int argc, const char* argv[])
 {
   // default input/output streams
-  in = stdin; out = stdout;
+  struct UserPtr user =
+  {
+    .in        = stdin,
+    .out       = stdout,
+    .pos       = 0, // initial input buffer is empty
+    .available = 0
+  };
+
   const char* dictionary = NULL;
 
   // first command-line parameter is our input filename / but ignore "-" which stands for STDIN
@@ -372,7 +392,7 @@ int main(int argc, const char* argv[])
     if (current[0] == '-' && current[1] == 'D')
     {
       if (parameter + 1 >= argc)
-        error("no dictionary filename found");
+        unlz4error("no dictionary filename found");
       dictionary = argv[++parameter];
       continue;
     }
@@ -382,16 +402,16 @@ int main(int argc, const char* argv[])
     if (current[0] != '-' && current[1] != '\0')
     {
       // already have a filename - at most one filename is allowed (except for dictionary) ?
-      if (in != stdin)
-        error("can only decompress one file at a time");
+      if (user.in != stdin)
+        unlz4error("can only decompress one file at a time");
       // get handle
-      in = fopen(argv[1], "rb");
-      if (!in)
-        error("file not found");
+      user.in = fopen(argv[1], "rb");
+      if (!user.in)
+        unlz4error("file not found");
     }
   }
 
   // and go !
-  unlz4(getByteFromIn, sendBytesToOut, dictionary);
+  unlz4_userPtr(getByteFromIn, sendBytesToOut, dictionary, &user);
   return 0;
 }

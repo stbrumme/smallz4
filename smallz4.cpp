@@ -46,26 +46,33 @@ static void error(const char* msg, int code = 1)
 }
 
 
-// ==================== I/O INTERFACE ====================
+// ==================== user-specific I/O INTERFACE ====================
 
-
-/// input stream,  usually stdin
-FILE* in = 0;
-/// read several bytes and store at "data", return number of actually read bytes (return only zero if end of data reached)
-size_t getBytesFromIn(void* data, size_t numBytes)
+struct UserPtr
 {
+  // file handles
+  FILE* in;
+  FILE* out;
+};
+
+/// read several bytes and store at "data", return number of actually read bytes (return only zero if end of data reached)
+size_t getBytesFromIn(void* data, size_t numBytes, void* userPtr)
+{
+  /// cast user-specific data
+  UserPtr* user = (UserPtr*)userPtr;
+
   if (data && numBytes > 0)
-    return fread(data, 1, numBytes, in);
+    return fread(data, 1, numBytes, user->in);
   return 0;
 }
 
-/// output stream, usually stdout
-FILE* out = 0;
 /// write a block of bytes
-void sendBytesToOut(const void* data, size_t numBytes)
+void sendBytesToOut(const void* data, size_t numBytes, void* userPtr)
 {
+  /// cast user-specific data
+  UserPtr* user = (UserPtr*)userPtr;
   if (data && numBytes > 0)
-    fwrite(data, 1, numBytes, out);
+    fwrite(data, 1, numBytes, user->out);
 }
 
 
@@ -186,13 +193,15 @@ int main(int argc, const char* argv[])
   }
 
   // default input/output streams
-  in = stdin; out = stdout;
+  UserPtr user;
+  user.in  = stdin;
+  user.out = stdout;
 
   // input file is given as first parameter or stdin if no parameter is given (or "-")
   if (argc > nextArgument && argv[nextArgument][0] != '-')
   {
-    in = fopen(argv[nextArgument], "rb");
-    if (!in)
+    user.in = fopen(argv[nextArgument], "rb");
+    if (!user.in)
       error("file not found");
     nextArgument++;
   }
@@ -204,8 +213,8 @@ int main(int argc, const char* argv[])
     if (!overwrite && fopen(argv[nextArgument], "rb"))
       error("output file already exists");
 
-    out = fopen(argv[nextArgument], "wb");
-    if (!out)
+    user.out = fopen(argv[nextArgument], "wb");
+    if (!user.out)
       error("cannot create file");
   }
 
@@ -244,6 +253,6 @@ int main(int argc, const char* argv[])
   }
 
   // and go !
-  smallz4::lz4(getBytesFromIn, sendBytesToOut, maxChainLength, preload, useLegacy);
+  smallz4::lz4(getBytesFromIn, sendBytesToOut, maxChainLength, preload, useLegacy, &user);
   return 0;
 }
