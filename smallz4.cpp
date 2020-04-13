@@ -27,6 +27,7 @@
 #include "smallz4.h"
 
 #include <cstdio>     // stdin/stdout/stderr, fopen, ...
+#include <ctime>      // time (verbose output)
 
 #ifdef _WIN32
   #include <io.h>     // isatty()
@@ -53,6 +54,12 @@ struct UserPtr
   // file handles
   FILE* in;
   FILE* out;
+  // the attributes below are just needed for verbose output
+  bool  verbose;
+  uint64_t numBytesIn;
+  uint64_t numBytesOut;
+  uint64_t totalSize;
+  time_t   starttime;
 };
 
 /// read several bytes and store at "data", return number of actually read bytes (return only zero if end of data reached)
@@ -62,8 +69,36 @@ size_t getBytesFromIn(void* data, size_t numBytes, void* userPtr)
   UserPtr* user = (UserPtr*)userPtr;
 
   if (data && numBytes > 0)
-    return fread(data, 1, numBytes, user->in);
+  {
+    size_t actual = fread(data, 1, numBytes, user->in);
+    user->numBytesIn += actual;
+
+    return actual;
+  }
   return 0;
+}
+
+/// show verbose info on STDERR
+void verbose(const UserPtr& user)
+{
+  if (!user.verbose)
+    return;
+  if (user.numBytesIn == 0)
+    return;
+
+  // elapsed and estimated time in seconds
+  int duration  = int(time(NULL) - user.starttime);
+  if (duration == 0)
+    return;
+  int estimated = int(duration * user.totalSize / user.numBytesIn);
+
+  // display on STDERR
+  fprintf(stderr, "\r%lld bytes => %lld bytes (%d%%", user.numBytesIn, user.numBytesOut, 100 * user.numBytesOut / user.numBytesIn);
+  if (estimated > 0)
+    fprintf(stderr, ", %d%% done", 100 * duration / estimated);
+  fprintf(stderr, "), after %d seconds @ %d kByte/s", duration, duration > 0 ? (user.numBytesIn / duration) / 1024 : 0);
+  if (estimated > 0)
+    fprintf(stderr, ", about %d seconds left  ", estimated - duration);
 }
 
 /// write a block of bytes
@@ -72,7 +107,13 @@ void sendBytesToOut(const void* data, size_t numBytes, void* userPtr)
   /// cast user-specific data
   UserPtr* user = (UserPtr*)userPtr;
   if (data && numBytes > 0)
+  {
     fwrite(data, 1, numBytes, user->out);
+    user->numBytesOut += numBytes;
+
+    if (user->verbose)
+      verbose(*user);
+  }
 }
 
 
@@ -82,7 +123,7 @@ void sendBytesToOut(const void* data, size_t numBytes, void* userPtr)
 // show simple help
 static void showHelp(const char* program)
 {
-  printf("smalLZ4 %s: compressor with optimal parsing, fully compatible with LZ4 by Yann Collet (see https://lz4.org)\n"
+  printf("smalLZ4 %s%s: compressor with optimal parsing, fully compatible with LZ4 by Yann Collet (see https://lz4.org)\n"
     "\n"
     "Basic usage:\n"
     "  %s [flags] [input] [output]\n"
@@ -105,6 +146,7 @@ static void showHelp(const char* program)
     "  -f              Overwrite an existing file\n"
     "  -l              Use LZ4 legacy file format\n"
     "  -D [FILE]       Load dictionary\n"
+    "  -v              Verbose\n"
     "\n"
     "Compression levels:\n"
     " -0               No compression\n"
@@ -112,8 +154,8 @@ static void showHelp(const char* program)
     " -%d ... -8        Lazy matching with optimal parsing, check %d to 8 matches\n"
     " -9               Optimal parsing, check all possible matches (default)\n"
     "\n"
-    "Written in 2016-2019 by Stephan Brumme https://create.stephan-brumme.com/smallz4/\n"
-    , smallz4::getVersion()
+    "Written in 2016-2020 by Stephan Brumme https://create.stephan-brumme.com/smallz4/\n"
+    , smallz4::getVersion(), ""
     , program, program, program, program, program, program, program, program
     , smallz4::ShortChainsGreedy,     smallz4::ShortChainsGreedy
     , smallz4::ShortChainsGreedy + 1, smallz4::ShortChainsGreedy + 1);
@@ -139,6 +181,15 @@ int main(int argc, const char* argv[])
   // preload dictionary from disk
   const char* dictionary = NULL;
 
+  // default input/output streams
+  UserPtr user;
+  user.in  = stdin;
+  user.out = stdout;
+  user.verbose     = false;
+  user.numBytesIn  = 0;
+  user.numBytesOut = 0;
+  user.totalSize   = 0;
+
   // parse flags
   int nextArgument = 1;
   bool skipArgument = false;
@@ -149,22 +200,22 @@ int main(int argc, const char* argv[])
     {
       switch (argv[nextArgument][argPos++])
       {
-      // show help
+        // show help
       case 'h':
         showHelp(argv[0]);
         return 0;
 
-      // force overwrite
+        // force overwrite
       case 'f':
         overwrite = true;
         break;
 
-      // old LZ4 format
+        // old LZ4 format
       case 'l':
         useLegacy = true;
         break;
 
-      // use dictionary
+        // use dictionary
       case 'D':
         if (nextArgument + 1 >= argc)
           error("no dictionary filename found");
@@ -172,12 +223,17 @@ int main(int argc, const char* argv[])
         skipArgument = true;
         break;
 
-      // set compression level
+        // display some info on STDERR while compressing
+      case 'v':
+        user.verbose = true;
+        break;
+
+        // set compression level
       case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8':
         maxChainLength = argv[nextArgument][1] - '0'; // "0" => 0, "1" => 1, ..., "8" => 8
         break;
 
-      // unlimited hash chain length
+        // unlimited hash chain length
       case '9':
         // default maxChainLength is already "unlimited"
         break;
@@ -191,11 +247,6 @@ int main(int argc, const char* argv[])
     if (skipArgument)
       nextArgument++;
   }
-
-  // default input/output streams
-  UserPtr user;
-  user.in  = stdin;
-  user.out = stdout;
 
   // input file is given as first parameter or stdin if no parameter is given (or "-")
   if (argc > nextArgument && argv[nextArgument][0] != '-')
@@ -252,7 +303,24 @@ int main(int argc, const char* argv[])
     fclose(dict);
   }
 
+  if (user.verbose)
+  {
+    if (user.in != stdin)
+    {
+      fseek(user.in, 0, SEEK_END);
+      user.totalSize = ftell(user.in);
+      fseek(user.in, 0, SEEK_SET);
+    }
+
+    user.starttime = time(NULL);
+  }
+
   // and go !
   smallz4::lz4(getBytesFromIn, sendBytesToOut, maxChainLength, preload, useLegacy, &user);
+
+  if (user.verbose && user.numBytesIn > 0)
+    fprintf(stderr, "\r%lld bytes => %lld bytes (%d%%) after %d seconds                                                                      \n",
+            user.numBytesIn, user.numBytesOut, 100 * user.numBytesOut / user.numBytesIn, int(time(NULL) - user.starttime));
+
   return 0;
 }
